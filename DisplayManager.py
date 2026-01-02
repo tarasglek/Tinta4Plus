@@ -20,59 +20,87 @@ class DisplayManager:
     # ThinkBook Plus Gen 4 IRU hardware specifications
     OLED_RESOLUTION_WH = [2880, 1800]
     EINK_RESOLUTION_WH = [2560, 1600]
+    
+    # Display name to resolution mapping for easy extension
+    DISPLAY_RESOLUTIONS = {
+        'eDP-1': [2880, 1800],  # OLED
+        'eDP-2': [2560, 1600],  # E-Ink
+    }
+    
+    # Timing constants (seconds)
+    XRANDR_APPLY_DELAY = 0.2
+    IMAGE_DISPLAY_DELAY = 0.5
+    XRANDR_TIMEOUT = 5
+    WHICH_TIMEOUT = 2
+    
+    # Cache timeout for xrandr queries (seconds)
+    XRANDR_CACHE_TTL = 0.5
 
     def __init__(self, logger):
         self.logger = logger
+        self._xrandr_cache = None
+        self._xrandr_cache_time = 0
+    
+    def _get_xrandr_output(self):
+        """Get cached xrandr output to reduce subprocess overhead"""
+        current_time = time.time()
+        if self._xrandr_cache is not None and (current_time - self._xrandr_cache_time) < self.XRANDR_CACHE_TTL:
+            return self._xrandr_cache
+        
+        try:
+            result = subprocess.run(
+                ['xrandr', '--query'],
+                capture_output=True,
+                text=True,
+                timeout=self.XRANDR_TIMEOUT
+            )
+            
+            if result.returncode != 0:
+                self.logger.error(f"xrandr error: {result.stderr}")
+                return None
+            
+            self._xrandr_cache = result.stdout
+            self._xrandr_cache_time = current_time
+            return result.stdout
+            
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"xrandr query timed out after {self.XRANDR_TIMEOUT}s")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to query xrandr: {e}")
+            return None
     
     def get_displays(self):
         """Get list of connected displays using xrandr"""
-        try:
-            result = subprocess.run(
-                ['xrandr', '--query'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            displays = []
-            for line in result.stdout.split('\n'):
-                if ' connected' in line:
-                    parts = line.split()
-                    name = parts[0]
-                    primary = 'primary' in line
-                    displays.append({'name': name, 'primary': primary})
-            
-            return displays
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get displays: {e}")
+        xrandr_output = self._get_xrandr_output()
+        if not xrandr_output:
             return []
+        
+        displays = []
+        for line in xrandr_output.split('\n'):
+            if ' connected' in line:
+                parts = line.split()
+                name = parts[0]
+                primary = 'primary' in line
+                displays.append({'name': name, 'primary': primary})
+        
+        return displays
     
     def is_display_active(self, display_name):
         """Check if a display is currently active (enabled and has geometry)"""
-        try:
-            result = subprocess.run(
-                ['xrandr', '--query'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-
-            for line in result.stdout.split('\n'):
-                if display_name in line and ' connected' in line:
-                    parts = line.split()
-                    # Display is active if it has geometry info (e.g., 1920x1080+0+0)
-                    # Look for pattern like "1920x1080+0+0" in the line
-                    for part in parts:
-                        if 'x' in part and '+' in part:
-                            return True
-                    return False
-
+        xrandr_output = self._get_xrandr_output()
+        if not xrandr_output:
             return False
-
-        except Exception as e:
-            self.logger.error(f"Failed to check display status: {e}")
-            return False
+        
+        for line in xrandr_output.split('\n'):
+            if display_name in line and ' connected' in line:
+                # Display is active if it has geometry info (e.g., 1920x1080+0+0)
+                for part in line.split():
+                    if 'x' in part and '+' in part:
+                        return True
+                return False
+        
+        return False
 
     def enable_display(self, display_name, scale=None):
         """Enable/turn on a display with optional scaling
@@ -84,12 +112,9 @@ class DisplayManager:
                    This keeps touch input properly mapped.
         """
         try:
-            # Determine native resolution based on display name
-            # eDP-1 is OLED, eDP-2 is E-Ink on ThinkBook Plus Gen 4
-            if display_name == "eDP-1":
-                native_width, native_height = self.OLED_RESOLUTION_WH
-            elif display_name == "eDP-2":
-                native_width, native_height = self.EINK_RESOLUTION_WH
+            # Determine native resolution from display name mapping
+            if display_name in self.DISPLAY_RESOLUTIONS:
+                native_width, native_height = self.DISPLAY_RESOLUTIONS[display_name]
             else:
                 self.logger.warning(f"Unknown display {display_name}, using auto mode")
                 native_width, native_height = None, None
@@ -129,15 +154,24 @@ class DisplayManager:
                 cmd.append('--auto')
 
             # Run xrandr command (may produce spurious BadMatch errors on stderr)
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=5
-            )
-
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=self.XRANDR_TIMEOUT
+                )
+                if result.returncode != 0:
+                    self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr}")
+            except subprocess.TimeoutExpired:
+                self.logger.error(f"xrandr enable command timed out after {self.XRANDR_TIMEOUT}s")
+                return False
+            
+            # Invalidate cache since display state changed
+            self._xrandr_cache = None
+            
             # Verify the display is actually enabled by checking its state
             # Give X11 a moment to apply the change
-            time.sleep(0.2)
+            time.sleep(self.XRANDR_APPLY_DELAY)
 
             if self.is_display_active(display_name):
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
@@ -155,15 +189,24 @@ class DisplayManager:
         """Disable/turn off a display"""
         try:
             # Run xrandr command (may produce spurious BadMatch errors on stderr)
-            subprocess.run(
-                ['xrandr', '--output', display_name, '--off'],
-                capture_output=True,
-                timeout=5
-            )
-
+            try:
+                result = subprocess.run(
+                    ['xrandr', '--output', display_name, '--off'],
+                    capture_output=True,
+                    timeout=self.XRANDR_TIMEOUT
+                )
+                if result.returncode != 0:
+                    self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr}")
+            except subprocess.TimeoutExpired:
+                self.logger.error(f"xrandr disable command timed out after {self.XRANDR_TIMEOUT}s")
+                return False
+            
+            # Invalidate cache since display state changed
+            self._xrandr_cache = None
+            
             # Verify the display is actually disabled by checking its state
             # Give X11 a moment to apply the change
-            time.sleep(0.2)
+            time.sleep(self.XRANDR_APPLY_DELAY)
 
             if not self.is_display_active(display_name):
                 self.logger.info(f"Disabled display: {display_name}")
@@ -179,16 +222,13 @@ class DisplayManager:
     def get_display_geometry(self, display_name):
         """Get the geometry (position and size) of a display using xrandr"""
         try:
-            result = subprocess.run(
-                ['xrandr', '--query'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            xrandr_output = self._get_xrandr_output()
+            if not xrandr_output:
+                return None
 
             # Parse xrandr output to find the display geometry
             # Format: "eDP-2 connected 1200x1920+1920+0 ..."
-            for line in result.stdout.split('\n'):
+            for line in xrandr_output.split('\n'):
                 if display_name in line and 'connected' in line:
                     # Look for the geometry pattern: WIDTHxHEIGHT+X+Y
                     parts = line.split()
@@ -258,7 +298,7 @@ class DisplayManager:
                 process = subprocess.Popen(cmd)
 
                 # Give it a moment to display
-                time.sleep(0.5)
+                time.sleep(self.IMAGE_DISPLAY_DELAY)
 
                 return process
 
@@ -278,7 +318,7 @@ class DisplayManager:
                 self.logger.warning("imv may not position on correct display automatically")
                 process = subprocess.Popen(cmd)
 
-                time.sleep(0.5)
+                time.sleep(self.IMAGE_DISPLAY_DELAY)
                 return process
 
             except Exception as e:
@@ -299,8 +339,11 @@ class DisplayManager:
                 ['which', command],
                 capture_output=True,
                 check=True,
-                timeout=2
+                timeout=self.WHICH_TIMEOUT
             )
             return True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except subprocess.CalledProcessError:
+            return False
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"Command check for '{command}' timed out")
             return False
