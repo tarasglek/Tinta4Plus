@@ -71,20 +71,11 @@ class HelperClient:
         return False
     
     def disconnect(self):
-        """Disconnect from helper daemon"""
+        """Disconnect from helper daemon client socket only (no server shutdown)."""
         with self.lock:
             if self.socket:
-                try:
-                    # Send shutdown command with timeout
-                    old_timeout = self.socket.gettimeout()
-                    self.socket.settimeout(2.0)  # Short timeout for shutdown
-                    self.send_command('shutdown')
-                    self.socket.settimeout(old_timeout)
-                except Exception as e:
-                    self.logger.debug(f"Error sending shutdown command: {e}")
-                
                 self._close_socket()
-            
+
             self.connected = False
             self.socket_path = None
             self.logger.info("Disconnected from helper daemon")

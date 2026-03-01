@@ -1,0 +1,13 @@
+[Unit]
+Description=Tinta4Plus privileged helper daemon
+Requires=tinta4plus-helper.socket
+After=tinta4plus-helper.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/tinta4plus/HelperDaemon.py
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
