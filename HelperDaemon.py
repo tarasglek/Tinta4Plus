@@ -26,16 +26,18 @@ import struct
 import signal
 import threading
 import logging
+import atexit
 
 from WatchdogTimer import WatchdogTimer
 from ECController import ECController
 from EInkUSBController import EInkUSBController 
 
 # Configuration
-SOCKET_PATH = '/tmp/tinta4plus.sock'
+SOCKET_PATH = '/run/tinta4plus.sock'
 PID_FILE = '/tmp/tinta4plus.pid'
 WATCHDOG_TIMEOUT = 20.0  # seconds
 LOG_LEVEL = logging.DEBUG  # Changed to DEBUG for detailed EC port access logging
+SYSTEMD_FIRST_FD = 3
 
 
 class HelperDaemon:
@@ -58,6 +60,7 @@ class HelperDaemon:
         # Setup signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+        atexit.register(self.shutdown)
     
     def _signal_handler(self, signum, frame):
         """Handle termination signals"""
@@ -83,27 +86,21 @@ class HelperDaemon:
             self.logger.warning(f"Failed to remove PID file: {e}")
     
     def _create_socket(self):
-        """Create Unix domain socket"""
-        # Remove old socket if exists
-        if os.path.exists(self.socket_path):
-            os.remove(self.socket_path)
-        
-        self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server_socket.bind(self.socket_path)
-        self.server_socket.listen(1)
-        
-        # Set permissions (readable/writable by all for simplicity)
-        os.chmod(self.socket_path, 0o666)
-        
-        self.logger.info(f"Listening on socket: {self.socket_path}")
+        """Use systemd socket activation only."""
+        listen_pid = os.environ.get('LISTEN_PID')
+        listen_fds = int(os.environ.get('LISTEN_FDS', '0'))
+
+        if not (listen_pid and int(listen_pid) == os.getpid() and listen_fds >= 1):
+            raise RuntimeError("Systemd socket activation not available (LISTEN_FDS/LISTEN_PID missing)")
+
+        self.server_socket = socket.socket(fileno=SYSTEMD_FIRST_FD)
+        self.logger.info(f"Using systemd-activated socket FD {SYSTEMD_FIRST_FD}")
     
     def _remove_socket(self):
-        """Remove socket file"""
+        """Close systemd-provided server socket."""
         try:
             if self.server_socket:
                 self.server_socket.close()
-            if os.path.exists(self.socket_path):
-                os.remove(self.socket_path)
             self.logger.info("Removed socket")
         except Exception as e:
             self.logger.warning(f"Failed to remove socket: {e}")
@@ -238,12 +235,6 @@ class HelperDaemon:
                 response['readback'] = f"0x{readback:02x}"
                 response['level'] = level
                 response['message'] = f'Brightness set to {level}' if success else f'Brightness set failed (readback mismatch)'
-            
-            elif cmd == 'shutdown':
-                response['success'] = True
-                response['message'] = 'Shutting down'
-                # Shutdown after sending response
-                threading.Timer(0.1, self.shutdown).start()
             
             else:
                 raise ValueError(f"Unknown command: {cmd}")
@@ -423,21 +414,30 @@ class HelperDaemon:
         sock.sendall(response_length + response_json)
     
     def shutdown(self):
-        """Shutdown the daemon"""
-        if not self.running:
-            return
-        
-        self.logger.info("Shutting down...")
+        """Shutdown the daemon (idempotent; always attempts cleanup)."""
+        was_running = self.running
         self.running = False
-        
+
+        if was_running:
+            self.logger.info("Shutting down...")
+        else:
+            self.logger.debug("Shutdown requested while not running; performing cleanup")
+
         # Cancel watchdog
-        self.watchdog.cancel()
-        
-        # Cleanup
-        self.cleanup_hardware()
+        try:
+            self.watchdog.cancel()
+        except Exception as e:
+            self.logger.debug(f"Watchdog cancel during shutdown failed: {e}")
+
+        # Cleanup resources even on early-startup failures
+        try:
+            self.cleanup_hardware()
+        except Exception as e:
+            self.logger.warning(f"Hardware cleanup failed: {e}")
+
         self._remove_socket()
         self._remove_pid_file()
-        
+
         self.logger.info("Shutdown complete")
 
 

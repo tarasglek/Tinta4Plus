@@ -1,0 +1,11 @@
+[Unit]
+Description=Tinta4Plus privileged helper socket
+
+[Socket]
+ListenStream=/run/tinta4plus.sock
+SocketMode=0660
+SocketGroup=tinta4plus
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
