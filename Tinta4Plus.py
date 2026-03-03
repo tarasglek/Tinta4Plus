@@ -171,7 +171,6 @@ class EInkControlGUI:
 
     # Configuration
     SOCKET_PATH = '/run/tinta4plus.sock'
-    KEEPALIVE_INTERVAL = 2.4  # seconds (send keepalive every 2.4s, watchdog is 20s)
     SOCKET_TIMEOUT = 10.0  # seconds
     CONFIG_DIR = os.path.expanduser("~/.config/Tinta4Plus")
     SETTINGS_FILE = os.path.join(os.path.expanduser("~/.config/Tinta4Plus"), "settings")
@@ -200,7 +199,6 @@ class EInkControlGUI:
 
         # Helper client
         self.helper = HelperClient(logger)
-        self.keepalive_after_id = None
 
         # Managers
         self.display_mgr = DisplayManager(logger)
@@ -660,7 +658,6 @@ class EInkControlGUI:
             if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
                 self.update_status("Connected to helper daemon")
                 self.log_message("Connected to helper daemon")
-                self.start_keepalive()
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -672,65 +669,9 @@ class EInkControlGUI:
             "Run installer or check:\n"
             "  systemctl status tinta4plus-helper.socket"
         )
-    
-    def start_keepalive(self):
-        """Start periodic keepalive messages"""
-        if self.keepalive_after_id:
-            self.root.after_cancel(self.keepalive_after_id)
-        
-        self.keepalive_after_id = self.root.after(
-            int(self.KEEPALIVE_INTERVAL * 1000),
-            self.send_keepalive
-        )
-        self.logger.info(f"Started keepalive timer ({self.KEEPALIVE_INTERVAL}s interval)")
-    
-    def send_keepalive(self):
-        """Send keepalive message to helper with improved error handling"""
-        if not self.helper.is_connected():
-            self.update_status("Helper disconnected - attempting restart...", error=True)
-            last_error = self.helper.get_last_error()
-            error_msg = f"Helper disconnected: {last_error}" if last_error else "Helper disconnected"
-            self.log_message(f"{error_msg}, attempting to restart...", level='error')
-            self.attempt_helper_restart()
-            return  # Don't schedule next keepalive
-        
-        try:
-            response = self.helper.send_command('keepalive')
-            if not response or not response.get('success'):
-                self.logger.warning(f"Keepalive failed: {response}")
-                self.log_message("Keepalive failed, restarting helper...", level='error')
-                self.attempt_helper_restart()
-                return
-            
-            # Log successful keepalive at debug level to avoid spam
-            self.logger.debug("Keepalive successful")
-            
-            # Schedule next keepalive
-            self.keepalive_after_id = self.root.after(
-                int(self.KEEPALIVE_INTERVAL * 1000),
-                self.send_keepalive
-            )
-            
-        except RuntimeError as e:
-            # Connection-related errors
-            self.logger.error(f"Keepalive connection error: {e}")
-            self.update_status("Helper connection lost - restarting...", error=True)
-            self.log_message(f"Connection error: {e}", level='error')
-            self.attempt_helper_restart()
-        
-        except Exception as e:
-            # Unexpected errors
-            self.logger.error(f"Keepalive unexpected error: {e}", exc_info=True)
-            self.update_status("Helper error - restarting...", error=True)
-            self.log_message(f"Unexpected error: {e}", level='error')
-            self.attempt_helper_restart()
-    
+
     def attempt_helper_restart(self):
         """Attempt to reconnect to systemd socket-activated helper."""
-        if self.keepalive_after_id:
-            self.root.after_cancel(self.keepalive_after_id)
-            self.keepalive_after_id = None
-
         self.log_message("Attempting to reconnect to helper daemon...")
 
         try:
@@ -745,7 +686,6 @@ class EInkControlGUI:
             if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
                 self.log_message("✓ Reconnected to helper daemon")
                 self.update_status("Reconnected to helper daemon")
-                self.start_keepalive()
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -1092,10 +1032,6 @@ class EInkControlGUI:
 
         # Stop refresh timer
         self._stop_refresh_timer()
-
-        # Stop keepalive
-        if self.keepalive_after_id:
-            self.root.after_cancel(self.keepalive_after_id)
 
         # Disconnect from helper client socket
         if self.helper.is_connected():

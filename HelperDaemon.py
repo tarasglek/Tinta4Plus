@@ -28,14 +28,12 @@ import threading
 import logging
 import atexit
 
-from WatchdogTimer import WatchdogTimer
 from ECController import ECController
 from EInkUSBController import EInkUSBController 
 
 # Configuration
 SOCKET_PATH = '/run/tinta4plus.sock'
 PID_FILE = '/tmp/tinta4plus.pid'
-WATCHDOG_TIMEOUT = 20.0  # seconds
 LOG_LEVEL = logging.DEBUG  # Changed to DEBUG for detailed EC port access logging
 SYSTEMD_FIRST_FD = 3
 
@@ -53,9 +51,6 @@ class HelperDaemon:
         # Hardware controllers
         self.eink = None
         self.ec = None
-        
-        # Watchdog
-        self.watchdog = WatchdogTimer(WATCHDOG_TIMEOUT, self.shutdown, self.logger)
         
         # Setup signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -144,17 +139,9 @@ class HelperDaemon:
             
             self.logger.debug(f"Handling command: {cmd}")
             
-            # Reset watchdog on any command
-            self.watchdog.reset()
-            
             response = {'success': False, 'error': None}
             
-            if cmd == 'keepalive':
-                # Simple keepalive/ping command
-                response['success'] = True
-                response['message'] = 'pong'
-            
-            elif cmd == 'enable-eink':
+            if cmd == 'enable-eink':
                 self.eink.enable_eink()
                 response['success'] = True
                 response['message'] = 'E-Ink display enabled'
@@ -355,22 +342,16 @@ class HelperDaemon:
             # Accept connections
             while self.running:
                 try:
-                    # Set timeout so we can check self.running periodically
-                    self.server_socket.settimeout(1.0)
-                    try:
-                        client_socket, _ = self.server_socket.accept()
-                        self.logger.info("Client connected")
-                        
-                        # Handle in a thread (though we expect only one client)
-                        client_thread = threading.Thread(
-                            target=self.handle_client,
-                            args=(client_socket,)
-                        )
-                        client_thread.daemon = True
-                        client_thread.start()
-                        
-                    except socket.timeout:
-                        continue
+                    client_socket, _ = self.server_socket.accept()
+                    self.logger.info("Client connected")
+                    
+                    # Handle in a thread (though we expect only one client)
+                    client_thread = threading.Thread(
+                        target=self.handle_client,
+                        args=(client_socket,)
+                    )
+                    client_thread.daemon = True
+                    client_thread.start()
                         
                 except Exception as e:
                     if self.running:
@@ -423,18 +404,11 @@ class HelperDaemon:
         else:
             self.logger.debug("Shutdown requested while not running; performing cleanup")
 
-        # Cancel watchdog
-        try:
-            self.watchdog.cancel()
-        except Exception as e:
-            self.logger.debug(f"Watchdog cancel during shutdown failed: {e}")
-
         # Cleanup resources even on early-startup failures
         try:
             self.cleanup_hardware()
         except Exception as e:
             self.logger.warning(f"Hardware cleanup failed: {e}")
-
         self._remove_socket()
         self._remove_pid_file()
 
@@ -474,7 +448,6 @@ def main():
     sys.excepthook = handle_exception
 
     logger.info("ThinkBook E-Ink Helper starting")
-    logger.info(f"Watchdog timeout: {WATCHDOG_TIMEOUT}s")
 
     daemon = HelperDaemon(logger)
     return daemon.run()
@@ -482,3 +455,5 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
