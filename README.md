@@ -33,6 +33,28 @@ Tinta4Plus now supports a systemd socket-activated privileged helper so normal a
 
 The app performs install/update flow directly when needed.
 
+### Helper HTTP API (Unix socket)
+
+Transport: HTTP over Unix domain socket at `/run/tinta4plus.sock`.
+
+Versioned endpoints:
+- `POST /v1/eink/enable`
+- `POST /v1/eink/disable`
+- `POST /v1/eink/refresh`
+- `POST /v1/eink/mode/dynamic`
+- `POST /v1/eink/mode/reading`
+- `GET  /v1/ec/status`
+- `GET  /v1/frontlight`
+- `POST /v1/frontlight/enable` (optional JSON: `{"brightness_level": <int>}`)
+- `POST /v1/frontlight/disable`
+- `POST /v1/frontlight/brightness` (JSON: `{"level": <int>}`)
+
+Response format remains JSON with existing keys like `success`, `error`, and command-specific fields.
+
+Server access log format (console/log file):
+- `HTTP unix-client "<METHOD> <PATH>" <STATUS> <DURATION_MS>ms`
+- Example: `HTTP unix-client "POST /v1/frontlight/brightness" 200 3.8ms`
+
 ## Missing Features and Known Bugs
 - Display scaling is not being handeled correctly during switch, which also causes the eInk touch mapping to be off.
 - Haven't figured out how to change the eInk contrast yet.

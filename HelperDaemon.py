@@ -1,459 +1,335 @@
 #!/usr/bin/env python3
 """
 Copyright (c) 2025 Jon Cox (joncox123). All rights reserved.
-
-WARNING: This software is provided "AS IS", without any warranty of any kind. It may contain bugs or other defects
-that result in data loss, corruption, hardware damage or other issues. Use at your own risk.
-It may temporarily or permanently render your hardware inoperable.
-It may corrupt or damage the Embedded Controller or eInk T-CON controller in your laptop.
-The author is not responsible for any damage, data loss or lost productivity caused by use of this software. 
-By downloading and using this software you agree to these terms and acknowledge the risks involved.
 """
 
-"""
-ThinkBook Plus Gen 4 IRU E-Ink Control Helper
-Privileged daemon for hardware control via Unix socket
-
-Requires: sudo/pkexec to run
-Dependencies: pyusb, portio (or python-periphery)
-"""
-
-import os
-import sys
 import json
-import socket
-import struct
-import signal
-import threading
 import logging
+import os
+import signal
+import socket
+import sys
+import time
 import atexit
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from ECController import ECController
-from EInkUSBController import EInkUSBController 
+from EInkUSBController import EInkUSBController
 
-# Configuration
 SOCKET_PATH = '/run/tinta4plus.sock'
 PID_FILE = '/tmp/tinta4plus.pid'
-LOG_LEVEL = logging.DEBUG  # Changed to DEBUG for detailed EC port access logging
+LOG_LEVEL = logging.DEBUG
 SYSTEMD_FIRST_FD = 3
 
 
+class HelperHTTPRequestHandler(BaseHTTPRequestHandler):
+    server_version = "Tinta4PlusHelper/1.0"
+
+    def _read_json_body(self):
+        length = int(self.headers.get('Content-Length', '0'))
+        raw = self.rfile.read(length) if length > 0 else b''
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {e}")
+
+    def _send_json(self, status, payload):
+        data = json.dumps(payload).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _dispatch(self, method):
+        start = time.time()
+        status, payload = self.server.daemon.handle_http_request(method, self.path, self._read_raw_body_if_needed(method))
+        self._send_json(status, payload)
+        elapsed_ms = (time.time() - start) * 1000
+        self.server.daemon.logger.info(
+            f'HTTP unix-client "{method} {self.path}" {status} {elapsed_ms:.1f}ms'
+        )
+
+    def _read_raw_body_if_needed(self, method):
+        if method != 'POST':
+            return b''
+        length = int(self.headers.get('Content-Length', '0'))
+        return self.rfile.read(length) if length > 0 else b''
+
+    def do_POST(self):
+        self._dispatch('POST')
+
+    def do_GET(self):
+        self._dispatch('GET')
+
+    def log_message(self, fmt, *args):
+        return
+
+
+class ActivatedUnixHTTPServer(HTTPServer):
+    address_family = socket.AF_UNIX
+
+    def __init__(self, sock, daemon):
+        self.daemon = daemon
+        super().__init__(server_address=SOCKET_PATH, RequestHandlerClass=HelperHTTPRequestHandler, bind_and_activate=False)
+        self.socket = sock
+        self.server_address = SOCKET_PATH
+
+    def server_bind(self):
+        return
+
+    def server_activate(self):
+        return
+
+
 class HelperDaemon:
-    """Main helper daemon with socket server and hardware controllers"""
-    
     def __init__(self, logger):
         self.logger = logger
         self.running = False
         self.socket_path = SOCKET_PATH
         self.pid_file = PID_FILE
         self.server_socket = None
-        
-        # Hardware controllers
+        self.http_server = None
         self.eink = None
         self.ec = None
-        
-        # Setup signal handlers
+
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
         atexit.register(self.shutdown)
-    
+
     def _signal_handler(self, signum, frame):
-        """Handle termination signals"""
         self.logger.info(f"Received signal {signum}, shutting down")
         self.shutdown()
-    
+
     def _create_pid_file(self):
-        """Create PID file"""
         try:
             with open(self.pid_file, 'w') as f:
                 f.write(str(os.getpid()))
             self.logger.info(f"Created PID file: {self.pid_file}")
         except Exception as e:
             self.logger.error(f"Failed to create PID file: {e}")
-    
+
     def _remove_pid_file(self):
-        """Remove PID file"""
         try:
             if os.path.exists(self.pid_file):
                 os.remove(self.pid_file)
                 self.logger.info("Removed PID file")
         except Exception as e:
             self.logger.warning(f"Failed to remove PID file: {e}")
-    
+
     def _create_socket(self):
-        """Use systemd socket activation only."""
         listen_pid = os.environ.get('LISTEN_PID')
         listen_fds = int(os.environ.get('LISTEN_FDS', '0'))
-
         if not (listen_pid and int(listen_pid) == os.getpid() and listen_fds >= 1):
             raise RuntimeError("Systemd socket activation not available (LISTEN_FDS/LISTEN_PID missing)")
-
         self.server_socket = socket.socket(fileno=SYSTEMD_FIRST_FD)
         self.logger.info(f"Using systemd-activated socket FD {SYSTEMD_FIRST_FD}")
-    
+
     def _remove_socket(self):
-        """Close systemd-provided server socket."""
         try:
-            if self.server_socket:
+            if self.http_server:
+                self.http_server.server_close()
+                self.http_server = None
+            elif self.server_socket:
                 self.server_socket.close()
             self.logger.info("Removed socket")
         except Exception as e:
             self.logger.warning(f"Failed to remove socket: {e}")
-    
+
     def initialize_hardware(self):
-        """Initialize hardware controllers"""
         try:
-            # Initialize EC controller
             self.logger.info("Initializing EC controller")
             self.ec = ECController(self.logger)
-
-            # Check if EC access is available
             ec_status = self.ec.get_access_status()
             if not ec_status['available']:
                 self.logger.warning(f"EC access not available: {ec_status['error_message']}")
-                # Continue anyway - E-Ink will still work
 
-            # Initialize E-Ink USB controller
             self.logger.info("Initializing E-Ink USB controller")
             self.eink = EInkUSBController(self.logger)
             self.eink.connect()
-
             self.logger.info("Hardware initialization complete")
             return True
-
         except Exception as e:
             self.logger.error(f"Hardware initialization failed: {e}")
             return False
-    
+
     def cleanup_hardware(self):
-        """Cleanup hardware connections"""
         if self.eink:
             self.eink.disconnect()
         self.logger.info("Hardware cleanup complete")
-    
+
     def handle_command(self, command_data):
-        """Process a command and return response"""
         try:
             cmd = command_data.get('command')
             params = command_data.get('params', {})
-            
-            self.logger.debug(f"Handling command: {cmd}")
-            
             response = {'success': False, 'error': None}
-            
+
             if cmd == 'enable-eink':
-                self.eink.enable_eink()
-                response['success'] = True
-                response['message'] = 'E-Ink display enabled'
-
+                self.eink.enable_eink(); response['success'] = True; response['message'] = 'E-Ink display enabled'
             elif cmd == 'disable-eink':
-                self.eink.disable_eink()
-                response['success'] = True
-                response['message'] = 'E-Ink display disabled'
-            
+                self.eink.disable_eink(); response['success'] = True; response['message'] = 'E-Ink display disabled'
             elif cmd == 'refresh-eink':
-                self.eink.refresh_full()
-                response['success'] = True
-                response['message'] = 'E-Ink full refresh completed'
-
+                self.eink.refresh_full(); response['success'] = True; response['message'] = 'E-Ink full refresh completed'
             elif cmd == 'set-dynamic':
-                self.eink.set_dynamic_mode()
-                response['success'] = True
-                response['message'] = 'E-Ink set to Dynamic Mode (fast refresh)'
-
+                self.eink.set_dynamic_mode(); response['success'] = True; response['message'] = 'E-Ink set to Dynamic Mode (fast refresh)'
             elif cmd == 'set-reading':
-                self.eink.set_reading_mode()
-                response['success'] = True
-                response['message'] = 'E-Ink set to Reading Mode (high-quality refresh)'
-
+                self.eink.set_reading_mode(); response['success'] = True; response['message'] = 'E-Ink set to Reading Mode (high-quality refresh)'
             elif cmd == 'get-ec-status':
-                # Return EC access status
-                status = self.ec.get_access_status()
-                response['success'] = True
-                response['ec_status'] = status
-                response['message'] = 'EC status retrieved'
-
+                status = self.ec.get_access_status(); response['success'] = True; response['ec_status'] = status; response['message'] = 'EC status retrieved'
             elif cmd == 'get-frontlight-state':
-                # Read current frontlight state from EC
-                if not self.ec.access_available:
-                    raise RuntimeError(self.ec.error_message or "EC access not available")
-
-                enabled = self.ec.get_frontlight_state()
-                brightness = self.ec.read_brightness()
-
-                response['success'] = True
-                response['frontlight_enabled'] = enabled
-                response['brightness_level'] = brightness
-                response['message'] = 'Frontlight state retrieved'
-
+                if not self.ec.access_available: raise RuntimeError(self.ec.error_message or "EC access not available")
+                enabled = self.ec.get_frontlight_state(); brightness = self.ec.read_brightness()
+                response['success'] = True; response['frontlight_enabled'] = enabled; response['brightness_level'] = brightness; response['message'] = 'Frontlight state retrieved'
             elif cmd == 'enable-frontlight':
-                # Check EC access first
-                if not self.ec.access_available:
-                    raise RuntimeError(self.ec.error_message or "EC access not available")
-
-                # Get optional brightness level parameter
+                if not self.ec.access_available: raise RuntimeError(self.ec.error_message or "EC access not available")
                 brightness_level = params.get('brightness_level')
                 success, readback = self.ec.enable_frontlight(brightness_level=brightness_level)
-                response['success'] = success
-                response['readback'] = f"0x{readback:02x}"
-                response['message'] = 'Frontlight enabled' if success else 'Frontlight enable failed (readback mismatch)'
-
+                response['success'] = success; response['readback'] = f"0x{readback:02x}"; response['message'] = 'Frontlight enabled' if success else 'Frontlight enable failed (readback mismatch)'
             elif cmd == 'disable-frontlight':
-                # Check EC access first
-                if not self.ec.access_available:
-                    raise RuntimeError(self.ec.error_message or "EC access not available")
-
+                if not self.ec.access_available: raise RuntimeError(self.ec.error_message or "EC access not available")
                 success, readback = self.ec.disable_frontlight()
-                response['success'] = success
-                response['readback'] = f"0x{readback:02x}"
-                response['message'] = 'Frontlight disabled' if success else 'Frontlight disable failed (readback mismatch)'
-
+                response['success'] = success; response['readback'] = f"0x{readback:02x}"; response['message'] = 'Frontlight disabled' if success else 'Frontlight disable failed (readback mismatch)'
             elif cmd == 'set-brightness':
-                # Check EC access first
-                if not self.ec.access_available:
-                    raise RuntimeError(self.ec.error_message or "EC access not available")
-
+                if not self.ec.access_available: raise RuntimeError(self.ec.error_message or "EC access not available")
                 level = params.get('level')
-                if level is None:
-                    raise ValueError("Missing 'level' parameter")
-
+                if level is None: raise ValueError("Missing 'level' parameter")
                 success, readback = self.ec.set_brightness(int(level))
-                response['success'] = success
-                response['readback'] = f"0x{readback:02x}"
-                response['level'] = level
+                response['success'] = success; response['readback'] = f"0x{readback:02x}"; response['level'] = level
                 response['message'] = f'Brightness set to {level}' if success else f'Brightness set failed (readback mismatch)'
-            
             else:
                 raise ValueError(f"Unknown command: {cmd}")
-            
             return response
-            
         except Exception as e:
             self.logger.error(f"Command error: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def handle_client(self, client_socket):
-        """Handle a client connection with improved error handling"""
-        client_addr = "unix-client"
-        self.logger.info(f"Client connected: {client_addr}")
-        
+            return {'success': False, 'error': str(e)}
+
+    def handle_http_request(self, method, path, body_bytes):
+        start = time.time()
+        route_map = {
+            ('POST', '/v1/eink/enable'): ('enable-eink', {}),
+            ('POST', '/v1/eink/disable'): ('disable-eink', {}),
+            ('POST', '/v1/eink/refresh'): ('refresh-eink', {}),
+            ('POST', '/v1/eink/mode/dynamic'): ('set-dynamic', {}),
+            ('POST', '/v1/eink/mode/reading'): ('set-reading', {}),
+            ('GET', '/v1/ec/status'): ('get-ec-status', {}),
+            ('GET', '/v1/frontlight'): ('get-frontlight-state', {}),
+            ('POST', '/v1/frontlight/enable'): ('enable-frontlight', 'body'),
+            ('POST', '/v1/frontlight/disable'): ('disable-frontlight', {}),
+            ('POST', '/v1/frontlight/brightness'): ('set-brightness', 'body'),
+        }
+
+        all_paths = {p for _, p in route_map.keys()}
+        if path not in all_paths:
+            status, payload = 404, {'success': False, 'error': 'Not found'}
+            self._log_access(method, path, status, start)
+            return status, payload
+
+        key = (method, path)
+        if key not in route_map:
+            status, payload = 405, {'success': False, 'error': 'Method not allowed'}
+            self._log_access(method, path, status, start)
+            return status, payload
+
         try:
-            while self.running:
-                # Receive data (with 4-byte length prefix)
-                try:
-                    length_data = self._recv_exact(client_socket, 4)
-                    if not length_data:
-                        self.logger.info("Client disconnected (no data)")
-                        break
-                    
-                    msg_length = struct.unpack('!I', length_data)[0]
-                    
-                    # Validate message length
-                    if msg_length > 1024 * 1024:  # 1MB limit
-                        self.logger.error(f"Message too large: {msg_length} bytes, closing connection")
-                        break
-                    
-                    # Receive the message
-                    data = self._recv_exact(client_socket, msg_length)
-                    if not data or len(data) != msg_length:
-                        self.logger.warning(f"Incomplete message received (expected {msg_length}, got {len(data) if data else 0})")
-                        break
-                    
-                except socket.timeout:
-                    self.logger.debug("Client socket timeout, continuing...")
-                    continue
-                
-                except Exception as e:
-                    self.logger.error(f"Error receiving from client: {e}")
-                    break
-                
-                # Parse JSON command
-                try:
-                    command_data = json.loads(data.decode('utf-8'))
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"Invalid JSON from client: {e}")
-                    error_response = {
-                        'success': False,
-                        'error': f"Invalid JSON: {e}"
-                    }
-                    self._send_response(client_socket, error_response)
-                    continue
-                
-                # Process command with timeout protection
-                try:
-                    response = self.handle_command(command_data)
-                except Exception as e:
-                    self.logger.error(f"Unhandled exception in command handler: {e}", exc_info=True)
-                    response = {
-                        'success': False,
-                        'error': f"Internal error: {e}"
-                    }
-                
-                # Send response
-                try:
-                    self._send_response(client_socket, response)
-                except Exception as e:
-                    self.logger.error(f"Error sending response to client: {e}")
-                    break
-                
+            parsed_body = {}
+            if body_bytes:
+                parsed_body = json.loads(body_bytes.decode('utf-8'))
+                if not isinstance(parsed_body, dict):
+                    raise ValueError('JSON body must be an object')
         except Exception as e:
-            self.logger.error(f"Client handler error: {e}", exc_info=True)
-        finally:
-            try:
-                client_socket.close()
-            except:
-                pass
-            self.logger.info("Client connection closed")
-    
+            status, payload = 400, {'success': False, 'error': f'Invalid JSON: {e}'}
+            self._log_access(method, path, status, start)
+            return status, payload
+
+        cmd, params_mode = route_map[key]
+        params = parsed_body if params_mode == 'body' else {}
+        payload = self.handle_command({'command': cmd, 'params': params})
+        status = 200
+        self._log_access(method, path, status, start)
+        return status, payload
+
+    def _log_access(self, method, path, status, start):
+        elapsed_ms = (time.time() - start) * 1000
+        self.logger.info(f'HTTP unix-client "{method} {path}" {status} {elapsed_ms:.1f}ms')
+
     def run(self):
-        """Main server loop"""
         try:
-            # Check if already running
             if os.path.exists(self.pid_file):
                 self.logger.warning(f"PID file exists: {self.pid_file}")
                 try:
                     with open(self.pid_file, 'r') as f:
                         old_pid = int(f.read().strip())
-                    # Check if process is still running
                     os.kill(old_pid, 0)
                     self.logger.error(f"Helper already running (PID {old_pid})")
                     return 1
                 except (OSError, ValueError):
                     self.logger.info("Stale PID file, removing")
                     os.remove(self.pid_file)
-            
-            # Create PID file
+
             self._create_pid_file()
-            
-            # Initialize hardware
             if not self.initialize_hardware():
                 self.logger.error("Failed to initialize hardware")
                 return 1
-            
-            # Create socket
+
             self._create_socket()
-            
             self.running = True
-            self.logger.info("Helper daemon started, waiting for connections")
-            
-            # Accept connections
-            while self.running:
-                try:
-                    client_socket, _ = self.server_socket.accept()
-                    self.logger.info("Client connected")
-                    
-                    # Handle in a thread (though we expect only one client)
-                    client_thread = threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket,)
-                    )
-                    client_thread.daemon = True
-                    client_thread.start()
-                        
-                except Exception as e:
-                    if self.running:
-                        self.logger.error(f"Accept error: {e}")
-                        break
-            
+            self.http_server = ActivatedUnixHTTPServer(self.server_socket, self)
+            self.logger.info("Helper daemon started (HTTP), waiting for connections")
+            self.http_server.serve_forever(poll_interval=0.5)
             return 0
-            
         except Exception as e:
             self.logger.error(f"Fatal error: {e}")
             return 1
-        
         finally:
             self.shutdown()
-    
-    def _recv_exact(self, sock, num_bytes):
-        """Receive exactly num_bytes from socket"""
-        data = b''
-        while len(data) < num_bytes:
-            chunk = sock.recv(num_bytes - len(data))
-            if not chunk:
-                return None
-            data += chunk
-        return data
-    
-    def _send_response(self, sock, response):
-        """Send JSON response with length prefix"""
-        response_json = json.dumps(response).encode('utf-8')
-        
-        # Validate response size
-        if len(response_json) > 1024 * 1024:
-            self.logger.error(f"Response too large: {len(response_json)} bytes")
-            # Send error response instead
-            error_response = json.dumps({
-                'success': False,
-                'error': 'Response too large'
-            }).encode('utf-8')
-            response_json = error_response
-        
-        response_length = struct.pack('!I', len(response_json))
-        sock.sendall(response_length + response_json)
-    
+
     def shutdown(self):
-        """Shutdown the daemon (idempotent; always attempts cleanup)."""
         was_running = self.running
         self.running = False
-
         if was_running:
             self.logger.info("Shutting down...")
-        else:
-            self.logger.debug("Shutdown requested while not running; performing cleanup")
 
-        # Cleanup resources even on early-startup failures
+        try:
+            if self.http_server:
+                self.http_server.shutdown()
+        except Exception:
+            pass
+
         try:
             self.cleanup_hardware()
         except Exception as e:
             self.logger.warning(f"Hardware cleanup failed: {e}")
+
         self._remove_socket()
         self._remove_pid_file()
-
         self.logger.info("Shutdown complete")
 
 
 def main():
-    """Entry point"""
-    # Check if running as root
     if os.geteuid() != 0:
         print("ERROR: This helper must be run as root (use pkexec or sudo)", file=sys.stderr)
         return 1
 
-    # Setup logging
     log_handlers = [
-        logging.StreamHandler(sys.stderr),  # Console output
-        logging.FileHandler('/tmp/TintaHelper.log', mode='w')  # File output (overwrite mode)
+        logging.StreamHandler(sys.stderr),
+        logging.FileHandler('/tmp/TintaHelper.log', mode='w')
     ]
-
-    logging.basicConfig(
-        level=LOG_LEVEL,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=log_handlers
-    )
+    logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=log_handlers)
     logger = logging.getLogger('tinta4plus-helper')
 
-    # Setup exception hook to log uncaught exceptions
     def handle_exception(exc_type, exc_value, exc_traceback):
-        """Log uncaught exceptions"""
         if issubclass(exc_type, KeyboardInterrupt):
-            # Allow keyboard interrupt to exit normally
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
-
         logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
 
     sys.excepthook = handle_exception
-
     logger.info("ThinkBook E-Ink Helper starting")
-
     daemon = HelperDaemon(logger)
     return daemon.run()
 
 
 if __name__ == '__main__':
     sys.exit(main())
-
-
