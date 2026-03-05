@@ -23,6 +23,10 @@ At the present time, Tinta4Plus only works on exactly the following system confi
 
 To run the app, simply cd into the extracted directory and execute: ./Tinta4Plus.py
 
+For a minimal CLI toggle (no options), run: `./toggle-eink.py`
+
+The CLI now uses the same mode-switch path as the GUI, including privacy image handling and optional XFCE theme autoswitch behavior from `~/.config/Tinta4Plus/settings`.
+
 ## Systemd socket-activated helper (recommended)
 
 Tinta4Plus now supports a systemd socket-activated privileged helper so normal app launches do not require runtime `pkexec` prompts.
