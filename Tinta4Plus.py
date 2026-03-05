@@ -32,6 +32,7 @@ from datetime import datetime
 
 from HelperClient import HelperClient
 from DisplayManager import DisplayManager
+from mode_switch import switch_to_eink, switch_to_oled
 
 class FloatingRefreshButton:
     """Floating refresh button window that stays on top"""
@@ -237,47 +238,6 @@ class EInkControlGUI:
 
         # Initialize helper after short delay
         self.root.after(500, self.initialize_helper)
-
-    def set_xfce_theme(self, theme_name):
-        """Set XFCE theme programmatically.
-
-        Args:
-            theme_name: Theme name like 'HighContrast' or 'Adwaita-dark'
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            subprocess.run([
-                'xfconf-query',
-                '-c', 'xsettings',
-                '-p', '/Net/ThemeName',
-                '-s', theme_name
-            ], check=True, capture_output=True)
-            self.log_message(f"Switched to {theme_name} theme")
-            return True
-        except subprocess.CalledProcessError as e:
-            self.log_message(f"Failed to set theme: {e}", level='error')
-            return False
-        except FileNotFoundError:
-            self.log_message("xfconf-query not found (not running XFCE?)", level='error')
-            return False
-
-    def get_current_theme(self):
-        """Get the current XFCE theme.
-
-        Returns:
-            str: Current theme name, or None if failed
-        """
-        try:
-            result = subprocess.run([
-                'xfconf-query',
-                '-c', 'xsettings',
-                '-p', '/Net/ThemeName'
-            ], capture_output=True, text=True, check=True)
-            return result.stdout.strip()
-        except:
-            return None
 
     def load_settings(self):
         """Load settings from configuration file"""
@@ -916,178 +876,56 @@ class EInkControlGUI:
     # === Event Handlers ===
     
     def on_eink_toggled(self):
-        """Handle E-Ink display toggle with automatic eDP switching"""
-        enabled = self.eink_enabled_var.get()
-        # Toggle the state
-        enabled = not enabled
+        """Handle E-Ink display toggle with shared switch logic."""
+        enabling = not self.eink_enabled_var.get()
 
-        if enabled:
-            # Enabling E-Ink
-            self.log_message("Enabling E-Ink display...")
-
-            # Step 0: Switch to High Contrast theme if enabled
-            if self.autoswitch_theme_var.get():
-                self.set_xfce_theme(self.THEME_HIGH_CONTRAST)
-
-            # Step 1: Enable E-Ink on eDP-2 first
-            self.log_message(f"Enabling E-Ink display on {self.DISPLAY_EINK} with {self.display_scale}x scale...")
-            if self.display_mgr.enable_display(self.DISPLAY_EINK, scale=self.display_scale):
-                self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) enabled with {self.display_scale}x scale")
-            else:
-                self.log_message(f"⚠ Failed to enable E-Ink display on {self.DISPLAY_EINK}", level='error')
-
-            # Small delay to ensure display is fully enabled
-            time.sleep(1.0)
-
-            # Step 2: Enable E-Ink via USB TCON controller
-            response = self.execute_helper_command('enable-eink')
-
-            if response:
+        if enabling:
+            ok = switch_to_eink(
+                self.display_mgr,
+                self.helper,
+                self.logger,
+                scale=self.display_scale,
+                autoswitch_theme=self.autoswitch_theme_var.get(),
+                enable_frontlight=True,
+                brightness_level=self.brightness_var.get(),
+            )
+            if ok:
                 self.eink_enabled_var.set(True)
                 self.eink_toggle_btn.config(text="eInk Enabled", bg="green", fg="white")
                 self.update_status("E-Ink display enabled")
-
-                # Enable refresh button and mode buttons
                 self.btn_refresh.config(state='normal')
                 self.btn_set_dynamic.config(state='normal')
                 self.btn_set_reading.config(state='normal')
-
-                # Step 3: Enable frontlight automatically with current brightness
-                self.log_message("Enabling frontlight for E-Ink display...")
-                brightness_level = self.brightness_var.get()
-                frontlight_response = self.execute_helper_command('enable-frontlight',
-                                                                  brightness_level=brightness_level)
-                if frontlight_response:
-                    self.log_message(f"✓ Frontlight enabled with brightness {brightness_level}")
-                else:
-                    self.log_message("⚠ Failed to enable frontlight (may not be available)", level='error')
-
-                # Small delay before disabling OLED
-                time.sleep(0.5)
-
-                # Step 4: Disable OLED display on eDP-1 as the last step
-                self.log_message(f"Disabling OLED display on {self.DISPLAY_OLED}...")
-                if self.display_mgr.disable_display(self.DISPLAY_OLED):
-                    self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) disabled")
-                else:
-                    self.log_message(f"⚠ Failed to disable OLED display on {self.DISPLAY_OLED}", level='error')
-
-                # Start periodic refresh timer if configured
                 self._start_refresh_timer()
-
-                # Create floating refresh button
                 self.log_message("Creating floating refresh button...")
-                self.floating_refresh_button = FloatingRefreshButton(
-                    self.root,
-                    self.on_refresh_full,
-                    self.logger
-                )
+                self.floating_refresh_button = FloatingRefreshButton(self.root, self.on_refresh_full, self.logger)
+            else:
+                self.log_message("⚠ Failed to switch to E-Ink", level='error')
+            return
 
-        else:
-            # Disabling E-Ink
-            self.log_message("Preparing to disable E-Ink display...")
-
-            # Step 1: Stop periodic refresh timer first
+        ok = switch_to_oled(
+            self.display_mgr,
+            self.helper,
+            self.logger,
+            scale=self.display_scale,
+            autoswitch_theme=self.autoswitch_theme_var.get(),
+            script_dir=os.path.dirname(os.path.abspath(__file__)),
+        )
+        if ok:
             self._stop_refresh_timer()
-
-            # Step 2: Destroy floating refresh button
             if self.floating_refresh_button:
                 self.log_message("Destroying floating refresh button...")
                 self.floating_refresh_button.destroy()
                 self.floating_refresh_button = None
 
-            # Step 3: Disable refresh button and mode buttons
             self.btn_refresh.config(state='disabled')
             self.btn_set_dynamic.config(state='disabled')
             self.btn_set_reading.config(state='disabled')
-
-            # Step 4: Display privacy image on E-Ink screen
-            image_path = self.EINK_DISABLED_IMAGE
-            if not os.path.exists(image_path):
-                # Try in script directory
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                image_path = os.path.join(script_dir, self.EINK_DISABLED_IMAGE)
-
-            if os.path.exists(image_path):
-                self.log_message(f"Displaying privacy image on {self.DISPLAY_EINK}...")
-                self.eink_image_process = self.display_mgr.display_fullscreen_image(
-                    self.DISPLAY_EINK,
-                    image_path
-                )
-
-                if self.eink_image_process:
-                    # Wait for image to fully render on E-Ink
-                    self.log_message("Waiting for image to render...")
-                    time.sleep(0.5)  # Give E-Ink time to display the image
-                else:
-                    self.log_message("Warning: Could not display privacy image", level='error')
-            else:
-                self.log_message(f"Warning: Privacy image not found: {self.EINK_DISABLED_IMAGE}", level='error')
-
-            # Step 4: Disable E-Ink via USB controller
-            self.log_message("Disabling E-Ink display via USB controller...")
-            response = self.execute_helper_command('disable-eink')
-
-            if response:
-                self.eink_enabled_var.set(False)
-                self.eink_toggle_btn.config(text="eInk Disabled", bg="yellow", fg="black")
-                self.update_status("E-Ink display disabled")
-
-                # Disable frontlight automatically when switching to OLED
-                self.log_message("Disabling frontlight...")
-                frontlight_response = self.execute_helper_command('disable-frontlight')
-                if frontlight_response:
-                    self.log_message("✓ Frontlight disabled")
-                else:
-                    self.log_message("⚠ Failed to disable frontlight", level='error')
-
-                time.sleep(2.0)  # Give E-Ink time to display the image
-
-                # Kill the image viewer process (image is now persisted on E-Ink)
-                if self.eink_image_process:
-                    try:
-                        self.eink_image_process.terminate()
-                        self.eink_image_process.wait(timeout=2)
-                        self.log_message("Closed image viewer (image persisted on E-Ink)")
-                    except:
-                        try:
-                            self.eink_image_process.kill()
-                        except:
-                            pass
-                    self.eink_image_process = None
-
-                # Step 1: Enable OLED display on eDP-1 first
-                self.log_message(f"Enabling OLED display on {self.DISPLAY_OLED} with {self.display_scale}x scale...")
-                if self.display_mgr.enable_display(self.DISPLAY_OLED, scale=self.display_scale):
-                    self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) enabled with {self.display_scale}x scale")
-                else:
-                    self.log_message(f"⚠ Failed to enable OLED display on {self.DISPLAY_OLED}", level='error')
-
-                # Small delay to ensure OLED is fully enabled
-                time.sleep(1.0)
-
-                # Step 5: Disable E-Ink on eDP-2 as the last step
-                self.log_message(f"Disabling E-Ink display on {self.DISPLAY_EINK}...")
-                if self.display_mgr.disable_display(self.DISPLAY_EINK):
-                    self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) disabled")
-                else:
-                    self.log_message(f"⚠ Failed to disable E-Ink display on {self.DISPLAY_EINK}", level='error')
-
-                # Step 6: Switch to Adwaita-dark theme if enabled
-                if self.autoswitch_theme_var.get():
-                    self.set_xfce_theme(self.THEME_ADWAITA_DARK)
-            else:
-                # Failed to disable - kill image viewer
-                if self.eink_image_process:
-                    try:
-                        self.eink_image_process.terminate()
-                        self.eink_image_process.wait(timeout=2)
-                    except:
-                        try:
-                            self.eink_image_process.kill()
-                        except:
-                            pass
-                    self.eink_image_process = None
+            self.eink_enabled_var.set(False)
+            self.eink_toggle_btn.config(text="eInk Disabled", bg="yellow", fg="black")
+            self.update_status("E-Ink display disabled")
+        else:
+            self.log_message("⚠ Failed to switch to OLED", level='error')
     
     def on_refresh_full(self):
         """Perform full E-Ink refresh"""
