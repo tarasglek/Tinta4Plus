@@ -160,6 +160,11 @@ class HelperDaemon:
             self.eink.disconnect()
         self.logger.info("Hardware cleanup complete")
 
+    def _set_frontlight_response(self, response, success, readback, success_msg, failure_msg):
+        response['success'] = success
+        response['readback'] = f"0x{readback:02x}"
+        response['message'] = success_msg if success else failure_msg
+
     def handle_command(self, command_data):
         try:
             cmd = command_data.get('command')
@@ -186,18 +191,53 @@ class HelperDaemon:
                 if not self.ec.access_available: raise RuntimeError(self.ec.error_message or "EC access not available")
                 brightness_level = params.get('brightness_level')
                 success, readback = self.ec.enable_frontlight(brightness_level=brightness_level)
-                response['success'] = success; response['readback'] = f"0x{readback:02x}"; response['message'] = 'Frontlight enabled' if success else 'Frontlight enable failed (readback mismatch)'
+                self._set_frontlight_response(
+                    response,
+                    success,
+                    readback,
+                    'Frontlight enabled',
+                    'Frontlight enable failed (readback mismatch)',
+                )
             elif cmd == 'disable-frontlight':
                 if not self.ec.access_available: raise RuntimeError(self.ec.error_message or "EC access not available")
                 success, readback = self.ec.disable_frontlight()
-                response['success'] = success; response['readback'] = f"0x{readback:02x}"; response['message'] = 'Frontlight disabled' if success else 'Frontlight disable failed (readback mismatch)'
+                self._set_frontlight_response(
+                    response,
+                    success,
+                    readback,
+                    'Frontlight disabled',
+                    'Frontlight disable failed (readback mismatch)',
+                )
             elif cmd == 'set-brightness':
                 if not self.ec.access_available: raise RuntimeError(self.ec.error_message or "EC access not available")
                 level = params.get('level')
                 if level is None: raise ValueError("Missing 'level' parameter")
-                success, readback = self.ec.set_brightness(int(level))
-                response['success'] = success; response['readback'] = f"0x{readback:02x}"; response['level'] = level
-                response['message'] = f'Brightness set to {level}' if success else f'Brightness set failed (readback mismatch)'
+
+                level = int(level)
+                response['level'] = level
+                if level == 0:
+                    success, readback = self.ec.disable_frontlight()
+                    self._set_frontlight_response(
+                        response,
+                        success,
+                        readback,
+                        'Frontlight disabled via brightness level 0',
+                        'Frontlight disable failed (readback mismatch)',
+                    )
+                else:
+                    enable_success, _ = self.ec.enable_frontlight()
+                    if not enable_success:
+                        response['success'] = False
+                        response['error'] = 'Failed to enable frontlight before setting brightness'
+                    else:
+                        success, readback = self.ec.set_brightness(level)
+                        self._set_frontlight_response(
+                            response,
+                            success,
+                            readback,
+                            f'Brightness set to {level}',
+                            f'Brightness set failed (readback mismatch)',
+                        )
             else:
                 raise ValueError(f"Unknown command: {cmd}")
             return response

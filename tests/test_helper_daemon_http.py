@@ -6,6 +6,33 @@ from HelperDaemon import HelperDaemon
 
 
 class HelperDaemonHTTPTests(unittest.TestCase):
+    def test_set_brightness_level_zero_disables_frontlight(self):
+        logger = Mock()
+        daemon = HelperDaemon(logger)
+        daemon.ec = Mock()
+        daemon.ec.access_available = True
+        daemon.ec.disable_frontlight.return_value = (True, 0x05)
+
+        payload = daemon.handle_command({"command": "set-brightness", "params": {"level": 0}})
+
+        self.assertTrue(payload["success"])
+        daemon.ec.disable_frontlight.assert_called_once_with()
+        daemon.ec.set_brightness.assert_not_called()
+
+    def test_set_brightness_positive_enables_then_sets_brightness(self):
+        logger = Mock()
+        daemon = HelperDaemon(logger)
+        daemon.ec = Mock()
+        daemon.ec.access_available = True
+        daemon.ec.enable_frontlight.return_value = (True, 0x06)
+        daemon.ec.set_brightness.return_value = (True, 0x04)
+
+        payload = daemon.handle_command({"command": "set-brightness", "params": {"level": 1}})
+
+        self.assertTrue(payload["success"])
+        daemon.ec.enable_frontlight.assert_called_once_with()
+        daemon.ec.set_brightness.assert_called_once_with(1)
+
     def test_post_v1_eink_refresh_maps_to_refresh_command(self):
         logger = Mock()
         daemon = HelperDaemon(logger)
