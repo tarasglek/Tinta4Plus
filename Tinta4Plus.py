@@ -24,10 +24,10 @@ import subprocess
 import sys
 import os
 import time
-import threading
 import logging
 import webbrowser
 import json
+import grp
 from datetime import datetime
 
 from HelperClient import HelperClient
@@ -169,7 +169,7 @@ class EInkControlGUI:
     VERSION = "0.1.0 alpha"
 
     # Configuration
-    SOCKET_PATH = '/tmp/tinta4plus.sock'
+    SOCKET_PATH = '/run/tinta4plus.sock'
     KEEPALIVE_INTERVAL = 2.4  # seconds (send keepalive every 2.4s, watchdog is 20s)
     SOCKET_TIMEOUT = 10.0  # seconds
     CONFIG_DIR = os.path.expanduser("~/.config/Tinta4Plus")
@@ -195,11 +195,11 @@ class EInkControlGUI:
         self.root = root
         self.root.title("ThinkBook E-Ink Control")
         self.root.geometry("600x700")
+        self._set_window_icon()
 
         # Helper client
         self.helper = HelperClient(logger)
         self.keepalive_after_id = None
-        self.helper_process = None
 
         # Managers
         self.display_mgr = DisplayManager(logger)
@@ -576,88 +576,141 @@ class EInkControlGUI:
     def show_info_dialog(self, message):
         """Show info dialog"""
         messagebox.showinfo("Information", message)
-    
-    def initialize_helper(self):
-        """Initialize connection to helper daemon"""
-        # First try to connect to existing helper
-        if os.path.exists(self.SOCKET_PATH):
-            try:
-                if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
-                    self.update_status("Connected to helper daemon")
-                    self.log_message("Connected to existing helper daemon")
-                    self.start_keepalive()
-                    return
-            except Exception as e:
-                self.log_message(f"Failed to connect to existing socket: {e}")
-                # Remove stale socket
-                try:
-                    os.remove(self.SOCKET_PATH)
-                except:
-                    pass
-        
-        # No existing helper, launch it
-        self.log_message("Helper daemon not found, launching...")
-        self.update_status("Launching helper daemon (password required)...")
-        
-        # Launch helper via pkexec in background
-        threading.Thread(target=self._launch_helper_thread, daemon=True).start()
-    
-    def _launch_helper_thread(self):
-        """Launch helper daemon in background thread"""
-        try:
-            # Determine helper script path
-            helper_path = self.HELPER_SCRIPT
-            
-            # If not installed, try relative to this script
-            if not os.path.exists(helper_path):
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                helper_path = os.path.join(script_dir, 'thinkbook-eink-helper.py')
-            
-            if not os.path.exists(helper_path):
-                self.root.after(0, self._helper_launch_failed, "Helper script not found")
-                return
-            
-            # Launch via pkexec (will show password prompt)
-            self.helper_process = subprocess.Popen(
-                ['pkexec', 'python3', helper_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            
-            # Wait a moment for helper to start
-            time.sleep(1.5)
-            
-            # Try to connect
-            max_attempts = 10
-            for attempt in range(max_attempts):
-                if os.path.exists(self.SOCKET_PATH):
-                    if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
-                        self.root.after(0, self._helper_launch_success)
-                        return
-                time.sleep(0.5)
-            
-            self.root.after(0, self._helper_launch_failed, 
-                          "Helper started but socket not available")
-            
-        except Exception as e:
-            self.root.after(0, self._helper_launch_failed, str(e))
-    
-    def _helper_launch_success(self):
-        """Called when helper successfully launched"""
-        self.update_status("Connected to helper daemon")
-        self.log_message("Helper daemon launched successfully")
-        self.start_keepalive()
 
-        # Check EC status
-        self.root.after(500, self.check_ec_status)
+    def _set_window_icon(self):
+        """Set window icon from common system icon paths if available."""
+        icon_candidates = [
+            "/usr/share/icons/elementary-xfce/apps/48/preferences-desktop-display.png",
+            "/usr/share/icons/HighContrast/48x48/apps/preferences-desktop-display.png",
+            "/usr/share/icons/HighContrast/32x32/apps/preferences-desktop-display.png",
+            "/usr/share/icons/hicolor/48x48/status/display-brightness.png",
+        ]
+
+        for icon_path in icon_candidates:
+            if os.path.exists(icon_path):
+                try:
+                    icon_image = tk.PhotoImage(file=icon_path)
+                    self.root.iconphoto(True, icon_image)
+                    self.root._tinta_icon_image = icon_image
+                    self.logger.info(f"Using window icon: {icon_path}")
+                    return
+                except Exception:
+                    continue
     
-    def _helper_launch_failed(self, error):
-        """Called when helper launch failed"""
-        self.update_status(f"Failed to launch helper: {error}", error=True)
-        self.log_message(f"ERROR: Failed to launch helper - {error}", level='error')
+    def _get_script_dir(self):
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _get_installer_path(self):
+        return os.path.join(self._get_script_dir(), 'scripts', 'install-systemd-helper-root.sh')
+
+    def _needs_helper_install_or_upgrade(self):
+        """Use installer --check mode to detect drift or missing setup."""
+        installer = self._get_installer_path()
+        if not os.path.exists(installer):
+            return True, f"Installer not found: {installer}"
+
+        user_name = os.environ.get('SUDO_USER') or os.environ.get('USER') or 'taras'
+        command = [installer, '--check', '--source-dir', self._get_script_dir(), '--user', user_name]
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            return False, None
+
+        if result.returncode == 1:
+            return True, None
+
+        details = (result.stderr or result.stdout or '').strip()
+        return True, details or f"Check failed with exit code {result.returncode}"
+
+    def _is_current_process_in_helper_group(self):
+        """Return True when this running process has tinta4plus group in its group list."""
+        try:
+            helper_group = grp.getgrnam('tinta4plus')
+        except KeyError:
+            return False
+
+        return helper_group.gr_gid in os.getgroups()
+
+    def _run_helper_installer(self):
+        installer = self._get_installer_path()
+        if not os.path.exists(installer):
+            return False, f"Installer not found: {installer}"
+
+        user_name = os.environ.get('SUDO_USER') or os.environ.get('USER') or 'taras'
+        command = ['pkexec', installer, '--user', user_name, '--source-dir', self._get_script_dir()]
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout or '').strip()
+            return False, details or f"Installer failed with exit code {result.returncode}"
+
+        return True, None
+
+    def _prompt_install_or_upgrade(self):
+        needs_install, check_error = self._needs_helper_install_or_upgrade()
+        if check_error:
+            self.log_message(f"WARNING: Helper check failed: {check_error}", level='warning')
+
+        if not needs_install and self._is_current_process_in_helper_group():
+            return True
+
+        if needs_install:
+            prompt = (
+                "Tinta4Plus needs to install or update the system helper service.\n\n"
+                "This is a one-time privileged action using pkexec.\n"
+                "Install now?"
+            )
+        else:
+            prompt = (
+                "Your user is not active in the 'tinta4plus' group in this session.\n\n"
+                "Tinta4Plus can refresh permissions via installer now, then you'll need to re-login\n"
+                "and restart the app. Continue?"
+            )
+
+        install_now = messagebox.askyesno("Install privileged helper", prompt)
+        if not install_now:
+            return False
+
+        self.update_status("Installing/updating helper service (password required)...")
+        self.log_message("Installing/updating helper service via pkexec...")
+        ok, error = self._run_helper_installer()
+        if not ok:
+            self.log_message(f"ERROR: Helper install failed - {error}", level='error')
+            self.show_error_dialog(f"Helper install failed:\n\n{error}")
+            return False
+
+        if not self._is_current_process_in_helper_group():
+            self.show_info_dialog(
+                "Helper service installed/updated.\n\n"
+                "You must log out and log back in (or run 'newgrp tinta4plus' from a shell)\n"
+                "then restart Tinta4Plus."
+            )
+            self.log_message("Group membership update requires re-login before reconnect", level='warning')
+            return False
+
+        self.log_message("✓ Helper service installed/updated")
+        return True
+
+    def initialize_helper(self):
+        """Initialize connection to systemd socket-activated helper daemon."""
+        if not self._prompt_install_or_upgrade():
+            self.update_status("Helper service not installed")
+            return
+
+        try:
+            if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
+                self.update_status("Connected to helper daemon")
+                self.log_message("Connected to helper daemon")
+                self.start_keepalive()
+                self.root.after(500, self.check_ec_status)
+                return
+        except Exception as e:
+            self.log_message(f"Failed to connect to helper socket: {e}", level='error')
+
+        self.update_status("Failed to connect to helper daemon", error=True)
         self.show_error_dialog(
-            f"Failed to launch helper daemon:\n\n{error}\n\n"
-            "Make sure you entered the correct password."
+            "Could not connect to helper daemon at /run/tinta4plus.sock.\n\n"
+            "Run installer or check:\n"
+            "  systemctl status tinta4plus-helper.socket"
         )
     
     def start_keepalive(self):
@@ -713,51 +766,39 @@ class EInkControlGUI:
             self.attempt_helper_restart()
     
     def attempt_helper_restart(self):
-        """Attempt to restart the helper daemon with better error recovery"""
-        # Cancel any existing keepalive
+        """Attempt to reconnect to systemd socket-activated helper."""
         if self.keepalive_after_id:
             self.root.after_cancel(self.keepalive_after_id)
             self.keepalive_after_id = None
-        
-        self.log_message("Attempting to restart helper daemon...")
-        
-        # Disconnect cleanly first
+
+        self.log_message("Attempting to reconnect to helper daemon...")
+
         try:
             if self.helper.is_connected():
                 self.helper.disconnect()
         except Exception as e:
             self.logger.debug(f"Error during disconnect: {e}")
-        
-        # Small delay to allow cleanup
+
         time.sleep(0.5)
-        
-        # Try to connect to existing socket first
-        if os.path.exists(self.SOCKET_PATH):
-            try:
-                if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
-                    self.log_message("✓ Reconnected to existing helper")
-                    self.update_status("Reconnected to helper daemon")
-                    self.start_keepalive()
-                    # Re-check EC status and sync frontlight state after reconnect
-                    self.root.after(500, self.check_ec_status)
-                    return
-            except Exception as e:
-                self.logger.debug(f"Failed to reconnect to existing socket: {e}")
-                # Get detailed error from helper client
-                last_error = self.helper.get_last_error()
-                if last_error:
-                    self.log_message(f"Connection error: {last_error}", level='error')
-                # Remove stale socket
-                try:
-                    os.remove(self.SOCKET_PATH)
-                    self.log_message("Removed stale socket file")
-                except Exception as e:
-                    self.logger.warning(f"Could not remove socket: {e}")
-        
-        # Need to launch new helper
-        self.log_message("Launching new helper daemon (password may be required)...")
-        self.update_status("Launching helper daemon...")
-        threading.Thread(target=self._launch_helper_thread, daemon=True).start()
+
+        try:
+            if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
+                self.log_message("✓ Reconnected to helper daemon")
+                self.update_status("Reconnected to helper daemon")
+                self.start_keepalive()
+                self.root.after(500, self.check_ec_status)
+                return
+        except Exception as e:
+            self.logger.debug(f"Failed to reconnect helper socket: {e}")
+
+        self.log_message("ERROR: Helper reconnection failed", level='error')
+        self.update_status("Helper disconnected", error=True)
+        self.show_error_dialog(
+            "Lost connection to helper daemon.\n\n"
+            "Check service status:\n"
+            "  systemctl status tinta4plus-helper.socket\n"
+            "  systemctl status tinta4plus-helper.service"
+        )
     
     def check_ec_status(self):
         """Check EC access status and disable frontlight controls if Secure Boot enabled"""
@@ -1218,17 +1259,9 @@ class EInkControlGUI:
         if self.keepalive_after_id:
             self.root.after_cancel(self.keepalive_after_id)
 
-        # Disconnect from helper (sends shutdown command)
+        # Disconnect from helper client socket
         if self.helper.is_connected():
             self.helper.disconnect()
-
-        # Terminate helper process if we launched it
-        if self.helper_process:
-            try:
-                self.helper_process.terminate()
-                self.helper_process.wait(timeout=2)
-            except:
-                pass
 
         self.root.destroy()
 
@@ -1407,7 +1440,7 @@ def show_disclaimer_dialog(parent=None):
 
 def main():
     """Entry point"""
-    HELPER_SCRIPT = '/usr/local/bin/HelperDaemon.py'  # Or use sys.argv[0] relative path
+    HELPER_SCRIPT = '/usr/local/lib/tinta4plus/HelperDaemon.py'
 
     # Setup logging
     log_handlers = [
@@ -1434,15 +1467,6 @@ def main():
 
     sys.excepthook = handle_exception
 
-    # Check if helper script exists
-    if not os.path.exists(HELPER_SCRIPT):
-        # Try relative path
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        alt_helper = os.path.join(script_dir, 'HelperDaemon.py')
-        if os.path.exists(alt_helper):
-            HELPER_SCRIPT = alt_helper
-            logger.info(f"Using helper at: {HELPER_SCRIPT}")
-    
     root = tk.Tk()
     root.withdraw()  # Hide the main window initially
 

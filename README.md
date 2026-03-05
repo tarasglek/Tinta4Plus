@@ -23,6 +23,12 @@ At the present time, Tinta4Plus only works on exactly the following system confi
 
 To run the app, simply cd into the extracted directory and execute: ./Tinta4Plus.py
 
+## Systemd socket-activated helper (recommended)
+
+Tinta4Plus now supports a systemd socket-activated privileged helper so normal app launches do not require runtime `pkexec` prompts.
+
+The app performs install/update flow directly when needed.
+
 ## Missing Features and Known Bugs
 - Display scaling is not being handeled correctly during switch, which also causes the eInk touch mapping to be off.
 - Haven't figured out how to change the eInk contrast yet.
