@@ -658,6 +658,7 @@ class EInkControlGUI:
             if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
                 self.update_status("Connected to helper daemon")
                 self.log_message("Connected to helper daemon")
+                self.sync_ui_from_display_state()
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -686,6 +687,7 @@ class EInkControlGUI:
             if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
                 self.log_message("✓ Reconnected to helper daemon")
                 self.update_status("Reconnected to helper daemon")
+                self.sync_ui_from_display_state()
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -876,15 +878,7 @@ class EInkControlGUI:
                 brightness_level=self.brightness_var.get(),
             )
             if ok:
-                self.eink_enabled_var.set(True)
-                self.eink_toggle_btn.config(text="eInk Enabled", bg="green", fg="white")
-                self.update_status("E-Ink display enabled")
-                self.btn_refresh.config(state='normal')
-                self.btn_set_dynamic.config(state='normal')
-                self.btn_set_reading.config(state='normal')
-                self._start_refresh_timer()
-                self.log_message("Creating floating refresh button...")
-                self.floating_refresh_button = FloatingRefreshButton(self.root, self.on_refresh_full, self.logger)
+                self.sync_ui_from_display_state()
             else:
                 self.log_message("⚠ Failed to switch to E-Ink", level='error')
             return
@@ -898,18 +892,7 @@ class EInkControlGUI:
             script_dir=os.path.dirname(os.path.abspath(__file__)),
         )
         if ok:
-            self._stop_refresh_timer()
-            if self.floating_refresh_button:
-                self.log_message("Destroying floating refresh button...")
-                self.floating_refresh_button.destroy()
-                self.floating_refresh_button = None
-
-            self.btn_refresh.config(state='disabled')
-            self.btn_set_dynamic.config(state='disabled')
-            self.btn_set_reading.config(state='disabled')
-            self.eink_enabled_var.set(False)
-            self.eink_toggle_btn.config(text="eInk Disabled", bg="yellow", fg="black")
-            self.update_status("E-Ink display disabled")
+            self.sync_ui_from_display_state()
         else:
             self.log_message("⚠ Failed to switch to OLED", level='error')
     

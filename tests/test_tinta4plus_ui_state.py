@@ -91,5 +91,93 @@ class UiStateSyncTests(unittest.TestCase):
         gui.log_message.assert_called()
 
 
+class GuiLifecycleSyncTests(unittest.TestCase):
+    def test_initialize_helper_syncs_ui_after_successful_connect(self):
+        gui = type("GuiStub", (), {})()
+        gui._prompt_install_or_upgrade = MagicMock(return_value=True)
+        gui.helper = MagicMock()
+        gui.helper.connect.return_value = True
+        gui.SOCKET_PATH = "/run/tinta4plus.sock"
+        gui.SOCKET_TIMEOUT = 10.0
+        gui.update_status = MagicMock()
+        gui.log_message = MagicMock()
+        gui.root = type("Root", (), {"after": MagicMock()})()
+        gui.check_ec_status = MagicMock()
+        gui.sync_ui_from_display_state = MagicMock()
+
+        Tinta4Plus.EInkControlGUI.initialize_helper(gui)
+
+        gui.sync_ui_from_display_state.assert_called_once()
+
+    def test_attempt_helper_restart_syncs_ui_after_successful_reconnect(self):
+        gui = type("GuiStub", (), {})()
+        gui.log_message = MagicMock()
+        gui.helper = MagicMock()
+        gui.helper.is_connected.return_value = True
+        gui.helper.connect.return_value = True
+        gui.logger = MagicMock()
+        gui.SOCKET_PATH = "/run/tinta4plus.sock"
+        gui.SOCKET_TIMEOUT = 10.0
+        gui.update_status = MagicMock()
+        gui.root = type("Root", (), {"after": MagicMock()})()
+        gui.check_ec_status = MagicMock()
+        gui.sync_ui_from_display_state = MagicMock()
+
+        with patch.object(Tinta4Plus.time, "sleep", return_value=None):
+            Tinta4Plus.EInkControlGUI.attempt_helper_restart(gui)
+
+        gui.sync_ui_from_display_state.assert_called_once()
+
+    def test_toggle_to_eink_uses_sync_ui_on_success(self):
+        gui = type("GuiStub", (), {})()
+        gui.eink_enabled_var = FakeVar(False)
+        gui.display_mgr = object()
+        gui.helper = object()
+        gui.logger = MagicMock()
+        gui.display_scale = 1.75
+        gui.autoswitch_theme_var = FakeVar(True)
+        gui.brightness_var = FakeVar(4)
+        gui.sync_ui_from_display_state = MagicMock()
+        gui.log_message = MagicMock()
+        gui.root = object()
+        gui.on_refresh_full = MagicMock()
+        gui.btn_refresh = FakeWidget()
+        gui.btn_set_dynamic = FakeWidget()
+        gui.btn_set_reading = FakeWidget()
+        gui.eink_toggle_btn = FakeWidget()
+        gui._start_refresh_timer = MagicMock()
+        gui.floating_refresh_button = None
+        gui.update_status = MagicMock()
+
+        with patch.object(Tinta4Plus, "switch_to_eink", return_value=True), \
+             patch.object(Tinta4Plus, "FloatingRefreshButton", MagicMock()):
+            Tinta4Plus.EInkControlGUI.on_eink_toggled(gui)
+
+        gui.sync_ui_from_display_state.assert_called_once()
+
+    def test_toggle_to_oled_uses_sync_ui_on_success(self):
+        gui = type("GuiStub", (), {})()
+        gui.eink_enabled_var = FakeVar(True)
+        gui.display_mgr = object()
+        gui.helper = object()
+        gui.logger = MagicMock()
+        gui.display_scale = 1.75
+        gui.autoswitch_theme_var = FakeVar(True)
+        gui.sync_ui_from_display_state = MagicMock()
+        gui.log_message = MagicMock()
+        gui._stop_refresh_timer = MagicMock()
+        gui.floating_refresh_button = None
+        gui.btn_refresh = FakeWidget()
+        gui.btn_set_dynamic = FakeWidget()
+        gui.btn_set_reading = FakeWidget()
+        gui.eink_toggle_btn = FakeWidget()
+        gui.update_status = MagicMock()
+
+        with patch.object(Tinta4Plus, "switch_to_oled", return_value=True):
+            Tinta4Plus.EInkControlGUI.on_eink_toggled(gui)
+
+        gui.sync_ui_from_display_state.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
