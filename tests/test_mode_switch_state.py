@@ -128,6 +128,61 @@ class ToggleEinkCliStateTests(unittest.TestCase):
         switch_to_oled.assert_not_called()
         switch_to_eink.assert_called_once()
 
+    def test_cli_switch_path_applies_stored_orientation_via_shared_mode_switch(self):
+        toggle_eink = load_toggle_eink_module()
+
+        logger = MagicMock()
+
+        class FakeDisplayManager:
+            last_instance = None
+
+            def __init__(self, _logger):
+                self.__class__.last_instance = self
+                self.rotation_calls = []
+
+            def is_display_active(self, display_name):
+                return display_name == mode_switch.DISPLAY_OLED
+
+            def enable_display(self, _display_name, scale=None):
+                return True
+
+            def disable_display(self, _display_name):
+                return True
+
+            def get_active_display(self):
+                return mode_switch.DISPLAY_EINK
+
+            def set_display_rotation(self, display_name, rotation):
+                self.rotation_calls.append((display_name, rotation))
+                return True
+
+        class FakeHelperClient:
+            def __init__(self, _logger):
+                self.connected = True
+
+            def connect(self, _socket_path, timeout=10.0):
+                return True
+
+            def is_connected(self):
+                return self.connected
+
+            def disconnect(self):
+                self.connected = False
+
+        with patch.object(toggle_eink, "setup_logger", return_value=logger), \
+             patch.object(toggle_eink, "DisplayManager", FakeDisplayManager), \
+             patch.object(toggle_eink, "HelperClient", FakeHelperClient), \
+             patch.object(toggle_eink, "load_settings", return_value={"display_scale": 1.75, "autoswitch_theme": False}), \
+             patch.object(mode_switch, "_disable_dpms_for_eink"), \
+             patch.object(mode_switch, "helper_command", return_value=True), \
+             patch.object(mode_switch, "_apply_input_mode", return_value=True), \
+             patch.object(mode_switch, "load_orientation_preference", return_value="left"), \
+             patch.object(mode_switch.time, "sleep", return_value=None):
+            exit_code = toggle_eink.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(FakeDisplayManager.last_instance.rotation_calls, [(mode_switch.DISPLAY_EINK, "left")])
+
 
 if __name__ == "__main__":
     unittest.main()
