@@ -8,7 +8,7 @@ import sys
 
 from DisplayManager import DisplayManager
 from HelperClient import HelperClient
-from mode_switch import DISPLAY_EINK, switch_to_eink, switch_to_oled
+from mode_switch import get_display_state, switch_to_eink, switch_to_oled
 
 SOCKET_PATH = "/run/tinta4plus.sock"
 DEFAULT_SCALE = 1.75
@@ -62,9 +62,9 @@ def main():
         scale = settings["display_scale"]
         autoswitch_theme = settings["autoswitch_theme"]
 
-        eink_active = display_mgr.is_display_active(DISPLAY_EINK)
+        state = get_display_state(display_mgr)
 
-        if eink_active:
+        if state["mode"] == "eink":
             ok = switch_to_oled(
                 display_mgr,
                 helper,
