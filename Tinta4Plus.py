@@ -1050,16 +1050,8 @@ class EInkControlGUI:
         """Handle window close"""
         self.logger.info("Application closing")
 
-        # If eInk is currently active, automatically switch back to OLED
-        # to display privacy image and prevent exposure of personal information
-        if self.eink_enabled_var.get():
-            self.log_message("eInk display is active - switching back to OLED before exit...")
-            self.logger.info("eInk active at exit - automatically switching to OLED")
-
-            # Trigger the toggle to switch back to OLED (this will display privacy image)
-            self.on_eink_toggled()
-
-            self.log_message("✓ Automatic switch to OLED completed")
+        # Do not change hardware display mode on exit.
+        # Persisted user preferences are already saved when changed.
 
         # Stop refresh timer
         self._stop_refresh_timer()
