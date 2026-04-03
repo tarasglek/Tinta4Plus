@@ -11,6 +11,7 @@ By downloading and using this software you agree to these terms and acknowledge 
 
 import subprocess
 import os
+import re
 import time
 
 
@@ -35,6 +36,9 @@ class DisplayManager:
     
     # Cache timeout for xrandr queries (seconds)
     XRANDR_CACHE_TTL = 0.5
+
+    SUPPORTED_ROTATIONS = {"normal", "left"}
+    XRANDR_ROTATIONS = {"normal", "left", "right", "inverted"}
 
     def __init__(self, logger):
         self.logger = logger
@@ -101,6 +105,66 @@ class DisplayManager:
                 return False
         
         return False
+
+    def get_active_display(self):
+        """Return currently active connected display name, or None."""
+        xrandr_output = self._get_xrandr_output()
+        if not xrandr_output:
+            return None
+
+        for line in xrandr_output.split('\n'):
+            if ' connected' not in line:
+                continue
+            parts = line.split()
+            if not parts:
+                continue
+            if any(re.match(r"^\d+x\d+\+\d+\+\d+$", part) for part in parts):
+                return parts[0]
+
+        return None
+
+    def get_display_rotation(self, display_name):
+        """Return raw xrandr rotation for display when supported, else None."""
+        xrandr_output = self._get_xrandr_output()
+        if not xrandr_output:
+            return None
+
+        for line in xrandr_output.split('\n'):
+            if display_name in line and ' connected' in line:
+                match = re.search(r" connected(?:\s+primary)?(?:\s+\d+x\d+\+\d+\+\d+)?\s+\(?(normal|left|right|inverted)\b", line)
+                rotation = match.group(1) if match else None
+                if rotation in self.SUPPORTED_ROTATIONS:
+                    return rotation
+                if rotation is not None:
+                    self.logger.warning(f"Unsupported rotation '{rotation}' for {display_name}")
+                return None
+
+        return None
+
+    def set_display_rotation(self, display_name, rotation):
+        """Set display rotation using xrandr."""
+        if rotation not in self.SUPPORTED_ROTATIONS:
+            self.logger.warning(f"Unsupported requested rotation '{rotation}'")
+            return False
+
+        try:
+            result = subprocess.run(
+                ['xrandr', '--output', display_name, '--rotate', rotation],
+                capture_output=True,
+                timeout=self.XRANDR_TIMEOUT
+            )
+            if result.returncode != 0:
+                self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr}")
+                return False
+
+            self._xrandr_cache = None
+            return True
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"xrandr rotation command timed out after {self.XRANDR_TIMEOUT}s")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to set display rotation: {e}")
+            return False
 
     def enable_display(self, display_name, scale=None):
         """Enable/turn on a display with optional scaling
