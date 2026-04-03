@@ -6,6 +6,7 @@ import asyncio
 import csv
 import os
 import signal
+import struct
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,11 @@ from typing import TextIO
 
 IIO_ROOT = Path("/sys/bus/iio/devices")
 INPUT_DEVICES = Path("/proc/bus/input/devices")
+
+EV_SYN = 0x00
+EV_SW = 0x05
+SW_TABLET_MODE = 0x01
+INPUT_EVENT_STRUCT = struct.Struct("llHHI")
 
 
 @dataclass(slots=True, frozen=True)
@@ -54,10 +60,36 @@ def find_tablet_mode_event() -> str | None:
     for block in blocks:
         if 'Name="Lenovo Yoga Tablet Mode Control switch"' not in block:
             continue
-        for token in block.split():
+        handlers_line = next((line for line in block.splitlines() if line.startswith("H: Handlers=")), "")
+        if not handlers_line:
+            continue
+        for token in handlers_line.removeprefix("H: Handlers=").split():
             if token.startswith("event") and token[5:].isdigit():
                 return f"/dev/input/{token}"
     return None
+
+
+def normalize_deg(value: float) -> float:
+    wrapped = value % 360.0
+    if wrapped > 180.0:
+        wrapped -= 360.0
+    return wrapped
+
+
+def decode_input_event(data: bytes) -> tuple[int, int, int]:
+    if len(data) != INPUT_EVENT_STRUCT.size:
+        raise ValueError(f"short read: {len(data)} < {INPUT_EVENT_STRUCT.size}")
+    _, _, event_type, code, value = INPUT_EVENT_STRUCT.unpack(data)
+    return event_type, code, int(value)
+
+
+def format_input_event_detail(event_type: int, code: int, value: int) -> str | None:
+    if event_type == EV_SYN:
+        return None
+    if event_type == EV_SW and code == SW_TABLET_MODE:
+        state = "tablet" if value else "laptop"
+        return f"SW_TABLET_MODE value={value} state={state}"
+    return f"event type=0x{event_type:02x} code=0x{code:02x} value={value}"
 
 
 class CsvSink:
@@ -91,7 +123,7 @@ class HingeSampler:
     def _emit(self, raws: tuple[int, int, int], detail: str) -> None:
         if raws == self._last:
             return
-        deg = tuple(v * self.dev.scale * 57.29577951308232 for v in raws)
+        deg = tuple(normalize_deg(v * self.dev.scale * 57.29577951308232) for v in raws)
         t = ts()
         self.sink.row([
             t,
@@ -126,20 +158,31 @@ class HingeSampler:
 
 
 async def input_task(sink: CsvSink, devnode: str) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        "libinput",
-        "debug-events",
-        "--device",
-        devnode,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    assert proc.stdout is not None
-    async for bline in proc.stdout:
-        line = bline.decode(errors="replace").rstrip("\n")
-        t = ts()
-        sink.row([t, "input", "", "", "", "", "", "", line])
-        print(f"{t} INPUT {line}")
+    fd = os.open(devnode, os.O_RDONLY)
+    try:
+        while True:
+            data = await asyncio.to_thread(os.read, fd, INPUT_EVENT_STRUCT.size)
+            if not data:
+                await asyncio.sleep(0.01)
+                continue
+            while len(data) < INPUT_EVENT_STRUCT.size:
+                chunk = await asyncio.to_thread(os.read, fd, INPUT_EVENT_STRUCT.size - len(data))
+                if not chunk:
+                    break
+                data += chunk
+            if len(data) != INPUT_EVENT_STRUCT.size:
+                continue
+
+            event_type, code, value = decode_input_event(data)
+            detail = format_input_event_detail(event_type, code, value)
+            if detail is None:
+                continue
+
+            t = ts()
+            sink.row([t, "input", "", "", "", "", "", "", detail])
+            print(f"{t} INPUT {detail}")
+    finally:
+        os.close(fd)
 
 
 async def main_async(cfg: AppConfig) -> int:
@@ -156,10 +199,10 @@ async def main_async(cfg: AppConfig) -> int:
             print("input=not-found")
 
         tasks = [asyncio.create_task(HingeSampler(hinge, sink).run(cfg.poll_interval_s))]
-        if tablet_input and shutil_which("libinput") and os.access(tablet_input, os.R_OK):
+        if tablet_input and os.access(tablet_input, os.R_OK):
             tasks.append(asyncio.create_task(input_task(sink, tablet_input)))
         elif cfg.include_input:
-            print(f"{ts()} WARN input stream unavailable (install libinput / use sudo)", file=sys.stderr)
+            print(f"{ts()} WARN input stream unavailable (need read access to tablet switch event node)", file=sys.stderr)
 
         try:
             if cfg.duration_s is None:
@@ -176,14 +219,6 @@ async def main_async(cfg: AppConfig) -> int:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     return 0
-
-
-def shutil_which(cmd: str) -> str | None:
-    for p in os.environ.get("PATH", "").split(":"):
-        cand = Path(p) / cmd
-        if cand.exists() and os.access(cand, os.X_OK):
-            return str(cand)
-    return None
 
 
 def parse_args() -> AppConfig:
