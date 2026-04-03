@@ -191,6 +191,24 @@ class GuiLifecycleSyncTests(unittest.TestCase):
 
         gui.sync_ui_from_display_state.assert_called_once()
 
+    def test_on_closing_does_not_toggle_display_mode(self):
+        gui = type("GuiStub", (), {})()
+        gui.logger = MagicMock()
+        gui.eink_enabled_var = FakeVar(True)
+        gui.log_message = MagicMock()
+        gui.on_eink_toggled = MagicMock()
+        gui._stop_refresh_timer = MagicMock()
+        gui.helper = MagicMock()
+        gui.helper.is_connected.return_value = True
+        gui.root = MagicMock()
+
+        Tinta4Plus.EInkControlGUI.on_closing(gui)
+
+        gui.on_eink_toggled.assert_not_called()
+        gui._stop_refresh_timer.assert_called_once()
+        gui.helper.disconnect.assert_called_once()
+        gui.root.destroy.assert_called_once()
+
 
 class FrontlightRecoveryTests(unittest.TestCase):
     def make_gui(self, ec_status):
