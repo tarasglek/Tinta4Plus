@@ -32,7 +32,7 @@ from datetime import datetime
 
 from HelperClient import HelperClient
 from DisplayManager import DisplayManager
-from mode_switch import switch_to_eink, switch_to_oled
+from mode_switch import get_display_state, switch_to_eink, switch_to_oled
 
 class FloatingRefreshButton:
     """Floating refresh button window that stays on top"""
@@ -813,6 +813,52 @@ class EInkControlGUI:
             self.show_error_dialog(f"Command '{command}' error:\n\n{e}")
             return None
     
+    def _ensure_floating_refresh_button(self):
+        if self.floating_refresh_button:
+            return
+
+        self.log_message("Creating floating refresh button...")
+        self.floating_refresh_button = FloatingRefreshButton(self.root, self.on_refresh_full, self.logger)
+
+    def _destroy_floating_refresh_button(self):
+        if not self.floating_refresh_button:
+            return
+
+        self.log_message("Destroying floating refresh button...")
+        self.floating_refresh_button.destroy()
+        self.floating_refresh_button = None
+
+    def sync_ui_from_display_state(self):
+        state = get_display_state(self.display_mgr)
+        mode = state["mode"]
+
+        if mode == "eink":
+            self.eink_enabled_var.set(True)
+            self.eink_toggle_btn.config(text="eInk Enabled", bg="green", fg="white")
+            self.btn_refresh.config(state='normal')
+            self.btn_set_dynamic.config(state='normal')
+            self.btn_set_reading.config(state='normal')
+            self._start_refresh_timer()
+            self._ensure_floating_refresh_button()
+            self.update_status("E-Ink display enabled")
+            return state
+
+        self.eink_enabled_var.set(False)
+        self.eink_toggle_btn.config(text="eInk Disabled", bg="yellow", fg="black")
+        self.btn_refresh.config(state='disabled')
+        self.btn_set_dynamic.config(state='disabled')
+        self.btn_set_reading.config(state='disabled')
+        self._stop_refresh_timer()
+        self._destroy_floating_refresh_button()
+
+        if mode == "oled":
+            self.update_status("E-Ink display disabled")
+        else:
+            self.log_message(f"⚠ Detected display mode '{mode}', disabling eInk UI controls", level='warning')
+            self.update_status("Display state uncertain - controls disabled")
+
+        return state
+
     # === Event Handlers ===
     
     def on_eink_toggled(self):
