@@ -32,7 +32,13 @@ from datetime import datetime
 
 from HelperClient import HelperClient
 from DisplayManager import DisplayManager
-from mode_switch import get_display_state, switch_to_eink, switch_to_oled
+from mode_switch import (
+    _apply_input_mode,
+    get_display_state,
+    save_orientation_preference,
+    switch_to_eink,
+    switch_to_oled,
+)
 
 class FloatingRefreshButton:
     """Floating refresh button window that stays on top"""
@@ -220,6 +226,7 @@ class EInkControlGUI:
 
         # Display scaling (from settings)
         self.display_scale = settings['display_scale']
+        self.orientation_rotation = None
 
         # Build UI
         self.build_ui()
@@ -354,9 +361,18 @@ class EInkControlGUI:
                                       state='disabled')
         self.btn_refresh.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky=(tk.W, tk.E))
 
+        # Orientation button
+        self.orientation_toggle_btn = ttk.Button(
+            display_frame,
+            text="Orientation: Landscape",
+            command=self.on_orientation_toggled,
+            state='disabled',
+        )
+        self.orientation_toggle_btn.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=(tk.W, tk.E))
+
         # Mode buttons (Dynamic and Reading)
         mode_frame = ttk.Frame(display_frame)
-        mode_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=(tk.W, tk.E))
+        mode_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky=(tk.W, tk.E))
         mode_frame.columnconfigure(0, weight=1)
         mode_frame.columnconfigure(1, weight=1)
 
@@ -372,10 +388,10 @@ class EInkControlGUI:
 
         # Refresh period slider
         refresh_period_label = ttk.Label(display_frame, text="Refresh period (s):")
-        refresh_period_label.grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
+        refresh_period_label.grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
 
         refresh_period_container = ttk.Frame(display_frame)
-        refresh_period_container.grid(row=3, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
+        refresh_period_container.grid(row=4, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
         refresh_period_container.columnconfigure(0, weight=1)
 
         self.refresh_period_var = tk.IntVar(value=15)
@@ -390,10 +406,10 @@ class EInkControlGUI:
 
         # Display scale slider
         scale_label = ttk.Label(display_frame, text="Display Scale:")
-        scale_label.grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        scale_label.grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
 
         scale_container = ttk.Frame(display_frame)
-        scale_container.grid(row=4, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
+        scale_container.grid(row=5, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
 
         # Autoswitch theme checkbox
         self.autoswitch_theme_var = tk.BooleanVar(value=True)
@@ -403,7 +419,7 @@ class EInkControlGUI:
             variable=self.autoswitch_theme_var,
             command=self.on_autoswitch_theme_changed
         )
-        self.autoswitch_theme_checkbox.grid(row=5, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+        self.autoswitch_theme_checkbox.grid(row=6, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
         scale_container.columnconfigure(0, weight=1)
 
         self.scale_var = tk.DoubleVar(value=1.75)
@@ -659,6 +675,7 @@ class EInkControlGUI:
                 self.update_status("Connected to helper daemon")
                 self.log_message("Connected to helper daemon")
                 self.sync_ui_from_display_state()
+                EInkControlGUI.sync_orientation_from_display_state(self)
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -688,6 +705,7 @@ class EInkControlGUI:
                 self.log_message("✓ Reconnected to helper daemon")
                 self.update_status("Reconnected to helper daemon")
                 self.sync_ui_from_display_state()
+                EInkControlGUI.sync_orientation_from_display_state(self)
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -832,6 +850,68 @@ class EInkControlGUI:
         self.floating_refresh_button.destroy()
         self.floating_refresh_button = None
 
+    def _orientation_label_from_rotation(self, rotation):
+        return "Portrait" if rotation == "left" else "Landscape"
+
+    def sync_orientation_from_display_state(self):
+        button = getattr(self, "orientation_toggle_btn", None)
+        if button is None:
+            return None
+
+        active_display = self.display_mgr.get_active_display()
+        if not active_display:
+            button.config(state='disabled')
+            self.log_message("⚠ No active display for orientation sync", level='warning')
+            return None
+
+        rotation = self.display_mgr.get_display_rotation(active_display)
+        if rotation not in ("normal", "left"):
+            button.config(state='disabled')
+            self.log_message(f"⚠ Unsupported live rotation '{rotation}' on {active_display}", level='warning')
+            return None
+
+        self.orientation_rotation = rotation
+        label = EInkControlGUI._orientation_label_from_rotation(self, rotation)
+        button.config(text=f"Orientation: {label}", state='normal')
+        return rotation
+
+    def on_orientation_toggled(self):
+        active_display = self.display_mgr.get_active_display()
+        if not active_display:
+            self.log_message("⚠ Cannot rotate: no active display", level='error')
+            return
+
+        current_rotation = self.display_mgr.get_display_rotation(active_display)
+        if current_rotation not in ("normal", "left"):
+            current_rotation = self.orientation_rotation
+
+        if current_rotation not in ("normal", "left"):
+            self.log_message("⚠ Cannot rotate: unknown current orientation", level='error')
+            return
+
+        target_rotation = "left" if current_rotation == "normal" else "normal"
+        if not self.display_mgr.set_display_rotation(active_display, target_rotation):
+            self.log_message("⚠ Failed to apply orientation rotation", level='error')
+            return
+
+        confirmed_rotation = self.display_mgr.get_display_rotation(active_display)
+        if confirmed_rotation not in ("normal", "left"):
+            self.log_message("⚠ Rotation applied but live orientation could not be confirmed", level='error')
+            return
+
+        self.orientation_rotation = confirmed_rotation
+        label = EInkControlGUI._orientation_label_from_rotation(self, confirmed_rotation)
+        self.orientation_toggle_btn.config(text=f"Orientation: {label}", state='normal')
+
+        mode = get_display_state(self.display_mgr).get("mode")
+        remap_target = mode if mode in ("eink", "oled") else None
+        if remap_target is None or not _apply_input_mode(self.logger, remap_target):
+            self.log_message("⚠ Rotation succeeded but input remap failed", level='warning')
+
+        save_orientation_preference(self.logger, confirmed_rotation)
+        self.update_status(f"Orientation set to {label}")
+        self.log_message(f"✓ Orientation set to {label}")
+
     def sync_ui_from_display_state(self):
         state = get_display_state(self.display_mgr)
         mode = state["mode"]
@@ -845,6 +925,7 @@ class EInkControlGUI:
             self._start_refresh_timer()
             self._ensure_floating_refresh_button()
             self.update_status("E-Ink display enabled")
+            EInkControlGUI.sync_orientation_from_display_state(self)
             return state
 
         self.eink_enabled_var.set(False)
@@ -861,6 +942,7 @@ class EInkControlGUI:
             self.log_message(f"⚠ Detected display mode '{mode}', disabling eInk UI controls", level='warning')
             self.update_status("Display state uncertain - controls disabled")
 
+        EInkControlGUI.sync_orientation_from_display_state(self)
         return state
 
     # === Event Handlers ===

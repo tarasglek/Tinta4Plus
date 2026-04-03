@@ -210,6 +210,94 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.root.destroy.assert_called_once()
 
 
+class OrientationUiTests(unittest.TestCase):
+    def make_gui(self):
+        gui = type("GuiStub", (), {})()
+        gui.display_mgr = MagicMock()
+        gui.orientation_toggle_btn = FakeWidget()
+        gui.orientation_rotation = None
+        gui.log_message = MagicMock()
+        gui.update_status = MagicMock()
+        gui.logger = MagicMock()
+        return gui
+
+    def test_sync_orientation_on_startup_updates_button_from_live_display_state(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-1"
+        gui.display_mgr.get_display_rotation.return_value = "left"
+
+        Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+
+        self.assertEqual(gui.orientation_rotation, "left")
+        self.assertEqual(gui.orientation_toggle_btn.cget("text"), "Orientation: Portrait")
+        self.assertEqual(gui.orientation_toggle_btn.cget("state"), "normal")
+
+    def test_sync_orientation_disables_button_when_no_active_display(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = None
+
+        Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+
+        self.assertEqual(gui.orientation_toggle_btn.cget("state"), "disabled")
+
+    def test_toggle_orientation_switches_between_landscape_and_portrait(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-2"
+        gui.display_mgr.get_display_rotation.side_effect = ["normal", "normal", "left"]
+        gui.display_mgr.set_display_rotation.return_value = True
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "eink"}), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True), \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+            Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
+
+        self.assertEqual(gui.orientation_toggle_btn.cget("text"), "Orientation: Portrait")
+
+    def test_toggle_orientation_reapplies_input_mode_on_success(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-1"
+        gui.display_mgr.get_display_rotation.side_effect = ["normal", "normal", "left"]
+        gui.display_mgr.set_display_rotation.return_value = True
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+            Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
+
+        apply_mode.assert_called_once_with(gui.logger, "oled")
+
+    def test_toggle_orientation_updates_ui_after_confirming_live_rotation(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-1"
+        gui.display_mgr.get_display_rotation.side_effect = ["normal", "normal", "left"]
+        gui.display_mgr.set_display_rotation.return_value = True
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True), \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+            Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
+
+        gui.display_mgr.get_display_rotation.assert_called_with("eDP-1")
+        self.assertEqual(gui.orientation_rotation, "left")
+
+    def test_failed_toggle_keeps_last_confirmed_orientation_label(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-1"
+        gui.display_mgr.get_display_rotation.return_value = "normal"
+        gui.display_mgr.set_display_rotation.return_value = False
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True), \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+            Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
+
+        self.assertEqual(gui.orientation_toggle_btn.cget("text"), "Orientation: Landscape")
+
+
 class FrontlightRecoveryTests(unittest.TestCase):
     def make_gui(self, ec_status):
         gui = type("GuiStub", (), {})()
