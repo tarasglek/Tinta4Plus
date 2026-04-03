@@ -20,6 +20,8 @@ DEFAULT_DPMS_SUSPEND = 0
 DEFAULT_DPMS_OFF = 600
 EINK_INPUT_PATTERNS = ["ITE Tech. Inc. ITE T-CON*"]
 OLED_INPUT_PATTERNS = ["Wacom HID 537D*"]
+SUPPORTED_ORIENTATION_ROTATIONS = {"normal", "left"}
+ORIENTATION_PREFERENCE_KEY = "orientation_preference"
 
 
 def get_display_state(display_mgr):
@@ -189,6 +191,46 @@ def _save_settings(logger, settings):
         return False
 
 
+def load_orientation_preference(logger):
+    settings = _load_settings(logger)
+    value = settings.get(ORIENTATION_PREFERENCE_KEY)
+    if value in SUPPORTED_ORIENTATION_ROTATIONS:
+        return value
+    if value is not None:
+        logger.warning(f"Ignoring unsupported orientation preference '{value}'")
+    return None
+
+
+def save_orientation_preference(logger, rotation):
+    if rotation not in SUPPORTED_ORIENTATION_ROTATIONS:
+        logger.warning(f"Refusing to save unsupported orientation '{rotation}'")
+        return False
+
+    settings = _load_settings(logger)
+    settings[ORIENTATION_PREFERENCE_KEY] = rotation
+    return _save_settings(logger, settings)
+
+
+def apply_stored_orientation(display_mgr, logger, target):
+    rotation = load_orientation_preference(logger)
+    if rotation is None:
+        return False
+
+    active_display = display_mgr.get_active_display()
+    if not active_display:
+        logger.warning("No active display found for orientation re-apply")
+        return False
+
+    if not display_mgr.set_display_rotation(active_display, rotation):
+        logger.warning(f"Failed to apply stored orientation '{rotation}' on {active_display}")
+        return False
+
+    if not _apply_input_mode(logger, target):
+        logger.warning(f"Applied orientation on {active_display}, but input remap failed for {target}")
+
+    return True
+
+
 def _capture_dpms_state(logger):
     try:
         result = subprocess.run(["xset", "q"], check=True, capture_output=True, text=True)
@@ -327,6 +369,8 @@ def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
     if not _apply_input_mode(logger, "eink"):
         logger.warning("Failed to apply E-Ink input mode; continuing display switch")
 
+    apply_stored_orientation(display_mgr, logger, target="eink")
+
     logger.info("Now using E-Ink")
     return True
 
@@ -385,6 +429,8 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     if not _apply_input_mode(logger, "oled"):
         logger.warning("Failed to apply OLED input mode; continuing display switch")
+
+    apply_stored_orientation(display_mgr, logger, target="oled")
 
     logger.info("Now using OLED")
     return True
