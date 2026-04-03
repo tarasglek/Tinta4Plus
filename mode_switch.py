@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared OLED <-> E-Ink mode switching logic for GUI and CLI."""
 
+import fnmatch
 import json
 import os
 import re
@@ -17,6 +18,28 @@ SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings")
 DEFAULT_DPMS_STANDBY = 120
 DEFAULT_DPMS_SUSPEND = 0
 DEFAULT_DPMS_OFF = 600
+EINK_INPUT_PATTERNS = ["ITE Tech. Inc. ITE T-CON*"]
+OLED_INPUT_PATTERNS = ["Wacom HID 537D*"]
+
+
+def get_display_state(display_mgr):
+    oled_active = display_mgr.is_display_active(DISPLAY_OLED)
+    eink_active = display_mgr.is_display_active(DISPLAY_EINK)
+
+    if oled_active and eink_active:
+        mode = "mixed"
+    elif oled_active:
+        mode = "oled"
+    elif eink_active:
+        mode = "eink"
+    else:
+        mode = "unknown"
+
+    return {
+        "oled_active": oled_active,
+        "eink_active": eink_active,
+        "mode": mode,
+    }
 
 
 def helper_command(helper, logger, command, **params):
@@ -46,6 +69,80 @@ def set_xfce_theme(logger, theme_name):
     except Exception as e:
         logger.warning(f"Failed to set theme to {theme_name}: {e}")
         return False
+
+
+def _run_xinput(logger, args):
+    try:
+        result = subprocess.run(["xinput", *args], check=True, capture_output=True, text=True)
+        return result.stdout
+    except Exception as e:
+        logger.warning(f"xinput {' '.join(args)} failed: {e}")
+        return None
+
+
+def _list_xinput_devices(logger):
+    output = _run_xinput(logger, ["--list", "--short"])
+    if output is None:
+        return []
+
+    devices = []
+    for line in output.splitlines():
+        if "id=" not in line:
+            continue
+
+        name_part, id_part = line.split("id=", 1)
+        device_id = id_part.split()[0]
+        if not device_id.isdigit():
+            continue
+
+        device_name = re.sub(r"^[\s⎡⎜⎣↳]+", "", name_part).strip()
+        devices.append({"id": int(device_id), "name": device_name})
+
+    return devices
+
+
+def _find_matching_input_ids(devices, patterns):
+    return [
+        device["id"]
+        for device in devices
+        if any(fnmatch.fnmatch(device["name"], pattern) for pattern in patterns)
+    ]
+
+
+def _set_input_enabled(logger, device_id, enabled):
+    action = "enable" if enabled else "disable"
+    return _run_xinput(logger, [action, str(device_id)]) is not None
+
+
+def _apply_input_mode(logger, target):
+    devices = _list_xinput_devices(logger)
+    if not devices:
+        logger.warning("No xinput devices found; skipping input mode update")
+        return False
+
+    eink_ids = set(_find_matching_input_ids(devices, EINK_INPUT_PATTERNS))
+    oled_ids = set(_find_matching_input_ids(devices, OLED_INPUT_PATTERNS))
+
+    if target == "eink":
+        enable_ids = sorted(eink_ids)
+        disable_ids = sorted(oled_ids - eink_ids)
+    elif target == "oled":
+        enable_ids = sorted(oled_ids)
+        disable_ids = sorted(eink_ids - oled_ids)
+    else:
+        logger.warning(f"Unknown input mode target: {target}")
+        return False
+
+    success = True
+    for device_id in enable_ids:
+        if not _set_input_enabled(logger, device_id, True):
+            success = False
+
+    for device_id in disable_ids:
+        if not _set_input_enabled(logger, device_id, False):
+            success = False
+
+    return success
 
 
 def _resolve_privacy_image_path(script_dir):
@@ -219,6 +316,9 @@ def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
         logger.error("Failed to disable OLED output")
         return False
 
+    if not _apply_input_mode(logger, "eink"):
+        logger.warning("Failed to apply E-Ink input mode; continuing display switch")
+
     logger.info("Now using E-Ink")
     return True
 
@@ -274,6 +374,9 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
         set_xfce_theme(logger, THEME_ADWAITA_DARK)
 
     _restore_dpms_after_eink(logger)
+
+    if not _apply_input_mode(logger, "oled"):
+        logger.warning("Failed to apply OLED input mode; continuing display switch")
 
     logger.info("Now using OLED")
     return True
