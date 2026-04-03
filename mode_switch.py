@@ -114,6 +114,10 @@ def _set_input_enabled(logger, device_id, enabled):
     return _run_xinput(logger, [action, str(device_id)]) is not None
 
 
+def _map_input_to_output(logger, device_id, output_name):
+    return _run_xinput(logger, ["map-to-output", str(device_id), output_name]) is not None
+
+
 def _apply_input_mode(logger, target):
     devices = _list_xinput_devices(logger)
     if not devices:
@@ -126,9 +130,11 @@ def _apply_input_mode(logger, target):
     if target == "eink":
         enable_ids = sorted(eink_ids)
         disable_ids = sorted(oled_ids - eink_ids)
+        target_output = DISPLAY_EINK
     elif target == "oled":
         enable_ids = sorted(oled_ids)
         disable_ids = sorted(eink_ids - oled_ids)
+        target_output = DISPLAY_OLED
     else:
         logger.warning(f"Unknown input mode target: {target}")
         return False
@@ -136,6 +142,8 @@ def _apply_input_mode(logger, target):
     success = True
     for device_id in enable_ids:
         if not _set_input_enabled(logger, device_id, True):
+            success = False
+        if not _map_input_to_output(logger, device_id, target_output):
             success = False
 
     for device_id in disable_ids:
