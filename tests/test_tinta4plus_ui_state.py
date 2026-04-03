@@ -26,6 +26,19 @@ class FakeWidget:
         return self.props.get(key)
 
 
+class FakeWarningWidget(FakeWidget):
+    def __init__(self):
+        super().__init__()
+        self.grid_called = False
+        self.grid_remove_called = False
+
+    def grid(self, **_kwargs):
+        self.grid_called = True
+
+    def grid_remove(self):
+        self.grid_remove_called = True
+
+
 class UiStateSyncTests(unittest.TestCase):
     def make_gui(self):
         gui = type("GuiStub", (), {})()
@@ -177,6 +190,40 @@ class GuiLifecycleSyncTests(unittest.TestCase):
             Tinta4Plus.EInkControlGUI.on_eink_toggled(gui)
 
         gui.sync_ui_from_display_state.assert_called_once()
+
+
+class FrontlightRecoveryTests(unittest.TestCase):
+    def make_gui(self, ec_status):
+        gui = type("GuiStub", (), {})()
+        gui.helper = MagicMock()
+        gui.helper.send_command.return_value = {"success": True, "ec_status": ec_status}
+        gui.secureboot_label = FakeWidget()
+        gui.secureboot_frame = FakeWidget()
+        gui.secure_boot_warning = FakeWarningWidget()
+        gui.brightness_scale = FakeWidget()
+        gui.log_message = MagicMock()
+        gui.sync_frontlight_state = MagicMock()
+        gui.logger = MagicMock()
+        return gui
+
+    def test_check_ec_status_enables_slider_hides_warning_and_syncs_when_available(self):
+        gui = self.make_gui({"secure_boot_enabled": False, "available": True})
+
+        Tinta4Plus.EInkControlGUI.check_ec_status(gui)
+
+        self.assertEqual(gui.brightness_scale.cget("state"), "normal")
+        self.assertTrue(gui.secure_boot_warning.grid_remove_called)
+        gui.sync_frontlight_state.assert_called_once()
+
+    def test_check_ec_status_disables_slider_and_shows_warning_when_unavailable(self):
+        gui = self.make_gui({"secure_boot_enabled": False, "available": False, "error_message": "denied"})
+
+        with patch.object(Tinta4Plus.messagebox, "showwarning", MagicMock()):
+            Tinta4Plus.EInkControlGUI.check_ec_status(gui)
+
+        self.assertEqual(gui.brightness_scale.cget("state"), "disabled")
+        self.assertTrue(gui.secure_boot_warning.grid_called)
+        gui.sync_frontlight_state.assert_not_called()
 
 
 if __name__ == "__main__":

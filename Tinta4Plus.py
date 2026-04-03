@@ -748,6 +748,8 @@ class EInkControlGUI:
                         self.log_message(f"EC access not available: {error_msg}", level='error')
                 else:
                     self.log_message("EC access verified - frontlight controls enabled")
+                    self.brightness_scale.config(state='normal')
+                    self.secure_boot_warning.grid_remove()
                     # Sync GUI with actual EC state
                     self.sync_frontlight_state()
 
