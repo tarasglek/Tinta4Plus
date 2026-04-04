@@ -118,7 +118,9 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.check_ec_status = MagicMock()
         gui.sync_ui_from_display_state = MagicMock()
 
-        Tinta4Plus.EInkControlGUI.initialize_helper(gui)
+        with patch.object(Tinta4Plus.EInkControlGUI, "_start_event_watcher"), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_schedule_event_watcher_poll"):
+            Tinta4Plus.EInkControlGUI.initialize_helper(gui)
 
         gui.sync_ui_from_display_state.assert_called_once()
 
@@ -136,7 +138,9 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.check_ec_status = MagicMock()
         gui.sync_ui_from_display_state = MagicMock()
 
-        with patch.object(Tinta4Plus.time, "sleep", return_value=None):
+        with patch.object(Tinta4Plus.time, "sleep", return_value=None), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_start_event_watcher"), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_schedule_event_watcher_poll"):
             Tinta4Plus.EInkControlGUI.attempt_helper_restart(gui)
 
         gui.sync_ui_from_display_state.assert_called_once()
