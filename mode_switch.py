@@ -74,11 +74,30 @@ def set_xfce_theme(logger, theme_name):
 
 
 def _run_xinput(logger, args):
+    command = f"xinput {' '.join(args)}"
+    logger.info(f"Running {command}")
+
     try:
         result = subprocess.run(["xinput", *args], check=True, capture_output=True, text=True)
+        stdout = (result.stdout or "").strip()
+        if stdout:
+            logger.info(f"{command} succeeded: {stdout}")
+        else:
+            logger.info(f"{command} succeeded")
         return result.stdout
+    except subprocess.CalledProcessError as e:
+        details = []
+        stderr = (e.stderr or "").strip()
+        stdout = (e.output or getattr(e, "stdout", "") or "").strip()
+        if stderr:
+            details.append(f"stderr={stderr}")
+        if stdout:
+            details.append(f"stdout={stdout}")
+        detail_suffix = f": {'; '.join(details)}" if details else ""
+        logger.warning(f"{command} failed (rc={e.returncode}){detail_suffix}")
+        return None
     except Exception as e:
-        logger.warning(f"xinput {' '.join(args)} failed: {e}")
+        logger.warning(f"{command} failed: {e}")
         return None
 
 
@@ -97,7 +116,7 @@ def _list_xinput_devices(logger):
         if not device_id.isdigit():
             continue
 
-        device_name = re.sub(r"^[\s⎡⎜⎣↳]+", "", name_part).strip()
+        device_name = re.sub(r"^[^0-9A-Za-z]+", "", name_part).strip()
         devices.append({"id": int(device_id), "name": device_name})
 
     return devices
@@ -120,14 +139,79 @@ def _map_input_to_output(logger, device_id, output_name):
     return _run_xinput(logger, ["map-to-output", str(device_id), output_name]) is not None
 
 
+def _expected_touch_ids_for_target(devices, target):
+    if target == "eink":
+        patterns = EINK_INPUT_PATTERNS
+    elif target == "oled":
+        patterns = OLED_INPUT_PATTERNS
+    else:
+        return []
+
+    return sorted(_find_matching_input_ids(devices, patterns))
+
+
+def _get_device_enabled_state(logger, device_id):
+    output = _run_xinput(logger, ["list-props", str(device_id)])
+    if output is None:
+        return None
+
+    match = re.search(r"Device Enabled \([^)]*\):\s*(\d+)", output)
+    if not match:
+        return None
+
+    return int(match.group(1))
+
+
+def _is_touch_healthy_for_target(logger, target):
+    devices = _list_xinput_devices(logger)
+    if not devices:
+        return False
+
+    expected_ids = _expected_touch_ids_for_target(devices, target)
+    if not expected_ids:
+        return False
+
+    for device_id in expected_ids:
+        if _get_device_enabled_state(logger, device_id) == 1:
+            return True
+    return False
+
+
+def ensure_touch_available(logger, target):
+    if _is_touch_healthy_for_target(logger, target):
+        return True
+
+    logger.warning(f"Touch unavailable for {target}; retrying input remap")
+    _apply_input_mode(logger, target)
+
+    if _is_touch_healthy_for_target(logger, target):
+        logger.info(f"Touch recovered for {target} after input remap retry")
+        return True
+
+    logger.warning(f"Touch still unavailable for {target} after input remap retry")
+    return False
+
+
 def _apply_input_mode(logger, target):
     devices = _list_xinput_devices(logger)
     if not devices:
         logger.warning("No xinput devices found; skipping input mode update")
         return False
 
-    eink_ids = set(_find_matching_input_ids(devices, EINK_INPUT_PATTERNS))
-    oled_ids = set(_find_matching_input_ids(devices, OLED_INPUT_PATTERNS))
+    eink_matches = [
+        device for device in devices
+        if any(fnmatch.fnmatch(device["name"], pattern) for pattern in EINK_INPUT_PATTERNS)
+    ]
+    oled_matches = [
+        device for device in devices
+        if any(fnmatch.fnmatch(device["name"], pattern) for pattern in OLED_INPUT_PATTERNS)
+    ]
+    eink_ids = {device["id"] for device in eink_matches}
+    oled_ids = {device["id"] for device in oled_matches}
+
+    logger.info(
+        f"Input mode {target}: matched E-Ink devices {sorted(eink_ids)}, OLED devices {sorted(oled_ids)}"
+    )
 
     if target == "eink":
         enable_ids = sorted(eink_ids)
@@ -141,6 +225,10 @@ def _apply_input_mode(logger, target):
         logger.warning(f"Unknown input mode target: {target}")
         return False
 
+    logger.info(
+        f"Input mode {target}: target_output={target_output} enable_ids={enable_ids} disable_ids={disable_ids}"
+    )
+
     success = True
     for device_id in enable_ids:
         if not _set_input_enabled(logger, device_id, True):
@@ -152,6 +240,9 @@ def _apply_input_mode(logger, target):
         if not _set_input_enabled(logger, device_id, False):
             success = False
 
+    logger.info(
+        f"Input mode {target} applied {'successfully' if success else 'with failures'}"
+    )
     return success
 
 
@@ -370,6 +461,7 @@ def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
         logger.warning("Failed to apply E-Ink input mode; continuing display switch")
 
     apply_stored_orientation(display_mgr, logger, target="eink")
+    ensure_touch_available(logger, "eink")
 
     logger.info("Now using E-Ink")
     return True
@@ -431,6 +523,7 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
         logger.warning("Failed to apply OLED input mode; continuing display switch")
 
     apply_stored_orientation(display_mgr, logger, target="oled")
+    ensure_touch_available(logger, "oled")
 
     logger.info("Now using OLED")
     return True

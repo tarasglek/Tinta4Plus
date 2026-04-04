@@ -84,6 +84,7 @@ class SwitchFlowOrientationTests(unittest.TestCase):
              patch.object(mode_switch, "_resolve_privacy_image_path", return_value=None), \
              patch.object(mode_switch, "load_orientation_preference", return_value="normal"), \
              patch.object(mode_switch, "_apply_input_mode", return_value=True) as apply_input_mode, \
+             patch.object(mode_switch, "ensure_touch_available", return_value=True), \
              patch.object(mode_switch.time, "sleep", return_value=None):
             self.display_mgr.get_active_display.return_value = mode_switch.DISPLAY_OLED
             self.display_mgr.set_display_rotation.return_value = False
@@ -98,6 +99,44 @@ class SwitchFlowOrientationTests(unittest.TestCase):
         self.assertTrue(ok)
         self.display_mgr.set_display_rotation.assert_called_once_with(mode_switch.DISPLAY_OLED, "normal")
         apply_input_mode.assert_called_once_with(self.logger, "oled")
+
+    def test_switch_to_eink_runs_touch_recovery_after_switch(self):
+        with patch.object(mode_switch, "_disable_dpms_for_eink"), \
+             patch.object(mode_switch, "set_xfce_theme", return_value=True), \
+             patch.object(mode_switch, "helper_command", return_value=True), \
+             patch.object(mode_switch, "_apply_input_mode", return_value=True), \
+             patch.object(mode_switch, "apply_stored_orientation", return_value=False), \
+             patch.object(mode_switch, "ensure_touch_available", return_value=True) as ensure_touch, \
+             patch.object(mode_switch.time, "sleep", return_value=None):
+            ok = mode_switch.switch_to_eink(
+                self.display_mgr,
+                self.helper,
+                self.logger,
+                autoswitch_theme=False,
+                enable_frontlight=False,
+            )
+
+        self.assertTrue(ok)
+        ensure_touch.assert_called_once_with(self.logger, "eink")
+
+    def test_switch_to_oled_runs_touch_recovery_after_switch(self):
+        with patch.object(mode_switch, "_restore_dpms_after_eink"), \
+             patch.object(mode_switch, "set_xfce_theme", return_value=True), \
+             patch.object(mode_switch, "helper_command", return_value=True), \
+             patch.object(mode_switch, "_resolve_privacy_image_path", return_value=None), \
+             patch.object(mode_switch, "_apply_input_mode", return_value=True), \
+             patch.object(mode_switch, "apply_stored_orientation", return_value=False), \
+             patch.object(mode_switch, "ensure_touch_available", return_value=False) as ensure_touch, \
+             patch.object(mode_switch.time, "sleep", return_value=None):
+            ok = mode_switch.switch_to_oled(
+                self.display_mgr,
+                self.helper,
+                self.logger,
+                autoswitch_theme=False,
+            )
+
+        self.assertTrue(ok)
+        ensure_touch.assert_called_once_with(self.logger, "oled")
 
 
 if __name__ == "__main__":
