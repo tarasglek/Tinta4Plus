@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
+
+
+LID_STATE_PATHS = (
+    "/proc/acpi/button/lid/LID0/state",
+    "/proc/acpi/button/lid/LID/state",
+)
 
 
 def _safe_send(send_message, payload):
@@ -25,17 +32,61 @@ def send_error(send_message, message):
     _safe_send(send_message, ("error", str(message)))
 
 
-def watch_events(send_conn):
-    """Process entrypoint.
+def _read_lid_state():
+    for path in LID_STATE_PATHS:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read().lower()
+            if "closed" in text:
+                return True
+            if "open" in text:
+                return False
+        except FileNotFoundError:
+            continue
+        except Exception:
+            return None
+    return None
 
-    Real lid/RandR subscriptions will push invalidations through this single channel.
-    For now this loop keeps the worker process alive until the parent terminates it.
-    """
+
+def _randr_fingerprint():
+    try:
+        output = subprocess.run(
+            ["xrandr", "--query"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except Exception:
+        return None
+
+    connected_lines = []
+    for line in output.splitlines():
+        if " connected" in line:
+            connected_lines.append(" ".join(line.split()))
+    return "\n".join(sorted(connected_lines))
+
+
+def watch_events(send_conn):
+    """Watch lid and display changes and emit invalidations on one channel."""
+
+    send_message = send_conn.send
+    last_lid_state = _read_lid_state()
+    last_randr = _randr_fingerprint()
 
     try:
         while True:
-            time.sleep(1.0)
+            time.sleep(0.5)
+
+            lid_state = _read_lid_state()
+            if lid_state is not None and lid_state != last_lid_state:
+                last_lid_state = lid_state
+                send_lid_invalidation(send_message)
+
+            randr = _randr_fingerprint()
+            if randr is not None and randr != last_randr:
+                last_randr = randr
+                send_randr_invalidation(send_message)
     except KeyboardInterrupt:
         return
     except Exception as exc:
-        send_error(send_conn.send, exc)
+        send_error(send_message, exc)
