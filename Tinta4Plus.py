@@ -1131,7 +1131,17 @@ class EInkControlGUI:
             return
 
         while conn.poll():
-            message = conn.recv()
+            try:
+                message = conn.recv()
+            except (EOFError, OSError):
+                self.log_message("Event watcher connection closed", level='warning')
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self._event_watcher_conn = None
+                return
+
             event_type, payload = message if isinstance(message, tuple) and len(message) == 2 else (None, None)
             if event_type in ("lid", "randr"):
                 self.root.after(0, self._reconcile_from_live_state)

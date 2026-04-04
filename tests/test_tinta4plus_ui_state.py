@@ -209,6 +209,22 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.helper.disconnect.assert_called_once()
         gui.root.destroy.assert_called_once()
 
+    def test_on_closing_stops_event_watcher_and_lid_inhibitor(self):
+        gui = type("GuiStub", (), {})()
+        gui.logger = MagicMock()
+        gui.log_message = MagicMock()
+        gui._stop_refresh_timer = MagicMock()
+        gui.helper = MagicMock()
+        gui.helper.is_connected.return_value = False
+        gui.root = MagicMock()
+
+        with patch.object(Tinta4Plus.EInkControlGUI, "_stop_event_watcher") as stop_watcher, \
+             patch.object(Tinta4Plus.EInkControlGUI, "_stop_lid_inhibitor") as stop_inhibitor:
+            Tinta4Plus.EInkControlGUI.on_closing(gui)
+
+        stop_watcher.assert_called_once_with(gui)
+        stop_inhibitor.assert_called_once_with(gui)
+
 
 class OrientationUiTests(unittest.TestCase):
     def make_gui(self):
@@ -595,6 +611,17 @@ class EventWatcherNotificationTests(unittest.TestCase):
 
         self.assertEqual(gui._reconcile_from_live_state.call_count, 2)
 
+    def test_randr_notification_triggers_live_state_resync(self):
+        gui = self.make_gui()
+        conn = MagicMock()
+        conn.poll.side_effect = [True, False]
+        conn.recv.return_value = ("randr", None)
+        gui._event_watcher_conn = conn
+
+        Tinta4Plus.EInkControlGUI._drain_event_watcher_notifications(gui)
+
+        gui._reconcile_from_live_state.assert_called_once()
+
     def test_notification_drain_does_not_do_direct_side_effects(self):
         gui = self.make_gui()
         gui.sync_ui_from_display_state = MagicMock()
@@ -618,6 +645,18 @@ class EventWatcherNotificationTests(unittest.TestCase):
 
         gui.log_message.assert_called_once()
         gui._reconcile_from_live_state.assert_not_called()
+
+    def test_closed_notification_pipe_does_not_crash_and_disables_watcher_conn(self):
+        gui = self.make_gui()
+        conn = MagicMock()
+        conn.poll.side_effect = [True]
+        conn.recv.side_effect = EOFError()
+        gui._event_watcher_conn = conn
+
+        Tinta4Plus.EInkControlGUI._drain_event_watcher_notifications(gui)
+
+        self.assertIsNone(gui._event_watcher_conn)
+        gui.log_message.assert_called_once()
 
 
 if __name__ == "__main__":
