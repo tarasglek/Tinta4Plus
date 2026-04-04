@@ -1047,11 +1047,41 @@ class EInkControlGUI:
         else:
             EInkControlGUI._stop_lid_inhibitor(self)
 
+        previous_mode = self._live_sync_state.get("display_mode")
+        previous_lid_closed = self._live_sync_state.get("lid_closed")
+
         active_display = self.display_mgr.get_active_display()
         if active_display:
             rotation = self.display_mgr.get_display_rotation(active_display)
             if rotation in ("normal", "left"):
                 self._live_sync_state["last_eink_orientation"] = rotation
+
+            if mode == "eink":
+                desired_rotation = "left" if lid_closed else "normal"
+                no_effective_change = (
+                    previous_mode == mode
+                    and previous_lid_closed == lid_closed
+                    and rotation == desired_rotation
+                    and self._live_sync_state.get("last_eink_orientation") == desired_rotation
+                )
+
+                if not no_effective_change and rotation != desired_rotation:
+                    if self.display_mgr.set_display_rotation(active_display, desired_rotation):
+                        confirmed_rotation = self.display_mgr.get_display_rotation(active_display)
+                        if confirmed_rotation in ("normal", "left"):
+                            self._live_sync_state["last_eink_orientation"] = confirmed_rotation
+                        else:
+                            confirmed_rotation = desired_rotation
+                            self._live_sync_state["last_eink_orientation"] = confirmed_rotation
+
+                        if _apply_input_mode(self.logger, "eink"):
+                            ensure_touch_available(self.logger, "eink")
+                        else:
+                            self.log_message("⚠ Lid-driven rotation succeeded but input remap failed", level='warning')
+
+                        save_orientation_preference(self.logger, confirmed_rotation)
+                    else:
+                        self.log_message("⚠ Failed to apply lid-driven E-Ink rotation", level='warning')
 
         process = getattr(self, "_lid_inhibitor_process", None)
         inhibitor_running = bool(process is not None and process.poll() is None)

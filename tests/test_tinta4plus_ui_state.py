@@ -443,6 +443,87 @@ class InhibitorLifecycleTests(unittest.TestCase):
         popen.assert_called_once()
 
 
+class LidDrivenRotationTests(unittest.TestCase):
+    def make_gui(self):
+        gui = type("GuiStub", (), {})()
+        gui.display_mgr = MagicMock()
+        gui.display_mgr.get_active_display.return_value = "eDP-2"
+        gui.sync_ui_from_display_state = MagicMock()
+        gui.logger = MagicMock()
+        gui.log_message = MagicMock()
+        return gui
+
+    def test_eink_plus_lid_closed_rotates_to_portrait_and_recovers_touch(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_display_rotation.side_effect = ["normal", "left"]
+        gui.display_mgr.set_display_rotation.return_value = True
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "eink"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=True), \
+             patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
+             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch, \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        gui.display_mgr.set_display_rotation.assert_called_once_with("eDP-2", "left")
+        apply_mode.assert_called_once_with(gui.logger, "eink")
+        ensure_touch.assert_called_once_with(gui.logger, "eink")
+
+    def test_eink_plus_lid_open_rotates_to_landscape_and_recovers_touch(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_display_rotation.side_effect = ["left", "normal"]
+        gui.display_mgr.set_display_rotation.return_value = True
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "eink"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=False), \
+             patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
+             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch, \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        gui.display_mgr.set_display_rotation.assert_called_once_with("eDP-2", "normal")
+        apply_mode.assert_called_once_with(gui.logger, "eink")
+        ensure_touch.assert_called_once_with(gui.logger, "eink")
+
+    def test_not_eink_mode_does_not_apply_lid_driven_rotation(self):
+        gui = self.make_gui()
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=True), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
+             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch:
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        gui.display_mgr.set_display_rotation.assert_not_called()
+        apply_mode.assert_not_called()
+        ensure_touch.assert_not_called()
+
+    def test_duplicate_invalidation_with_no_effective_change_is_ignored(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_display_rotation.side_effect = ["normal", "left", "left"]
+        gui.display_mgr.set_display_rotation.return_value = True
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "eink"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=True), \
+             patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
+             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True), \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        gui.display_mgr.set_display_rotation.assert_called_once_with("eDP-2", "left")
+        apply_mode.assert_called_once_with(gui.logger, "eink")
+
+
 class EventWatcherLifecycleTests(unittest.TestCase):
     def make_gui(self):
         gui = type("GuiStub", (), {})()
