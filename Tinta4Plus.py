@@ -28,12 +28,16 @@ import logging
 import webbrowser
 import json
 import grp
+from multiprocessing import Process, Pipe
 from datetime import datetime
+
+from event_watcher import watch_events
 
 from HelperClient import HelperClient
 from DisplayManager import DisplayManager
 from mode_switch import (
     _apply_input_mode,
+    ensure_touch_available,
     get_display_state,
     save_orientation_preference,
     switch_to_eink,
@@ -227,6 +231,18 @@ class EInkControlGUI:
         # Display scaling (from settings)
         self.display_scale = settings['display_scale']
         self.orientation_rotation = None
+
+        # Live state reconciliation + helper notifications
+        self._live_sync_state = {
+            "display_mode": None,
+            "lid_closed": None,
+            "inhibitor_running": False,
+            "last_eink_orientation": None,
+        }
+        self._event_watcher_conn = None
+        self._event_watcher_process = None
+        self._event_watcher_poll_job = None
+        self._lid_inhibitor_process = None
 
         # Build UI
         self.build_ui()
@@ -676,6 +692,9 @@ class EInkControlGUI:
                 self.log_message("Connected to helper daemon")
                 self.sync_ui_from_display_state()
                 EInkControlGUI.sync_orientation_from_display_state(self)
+                EInkControlGUI._start_event_watcher(self)
+                if getattr(self, "_event_watcher_poll_job", None) is None:
+                    EInkControlGUI._schedule_event_watcher_poll(self)
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -706,6 +725,9 @@ class EInkControlGUI:
                 self.update_status("Reconnected to helper daemon")
                 self.sync_ui_from_display_state()
                 EInkControlGUI.sync_orientation_from_display_state(self)
+                EInkControlGUI._start_event_watcher(self)
+                if getattr(self, "_event_watcher_poll_job", None) is None:
+                    EInkControlGUI._schedule_event_watcher_poll(self)
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -907,6 +929,8 @@ class EInkControlGUI:
         remap_target = mode if mode in ("eink", "oled") else None
         if remap_target is None or not _apply_input_mode(self.logger, remap_target):
             self.log_message("⚠ Rotation succeeded but input remap failed", level='warning')
+        else:
+            ensure_touch_available(self.logger, remap_target)
 
         save_orientation_preference(self.logger, confirmed_rotation)
         self.update_status(f"Orientation set to {label}")
@@ -944,6 +968,150 @@ class EInkControlGUI:
 
         EInkControlGUI.sync_orientation_from_display_state(self)
         return state
+
+    def _read_live_lid_state(self):
+        candidates = [
+            "/proc/acpi/button/lid/LID0/state",
+            "/proc/acpi/button/lid/LID/state",
+        ]
+        for path in candidates:
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    text = handle.read().lower()
+                if "closed" in text:
+                    return True
+                if "open" in text:
+                    return False
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                self.logger.debug(f"Failed reading lid state from {path}: {e}")
+
+        return False
+
+    def _start_lid_inhibitor(self):
+        process = getattr(self, "_lid_inhibitor_process", None)
+        if process is not None and process.poll() is None:
+            return
+
+        command = [
+            "systemd-inhibit",
+            "--what=handle-lid-switch",
+            "--who=Tinta4Plus",
+            "--why=Keep E-Ink active while lid events are managed by GUI",
+            "sleep",
+            "infinity",
+        ]
+
+        try:
+            self._lid_inhibitor_process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.log_message("Lid-close suspend inhibitor enabled")
+        except Exception as e:
+            self._lid_inhibitor_process = None
+            self.log_message(f"Failed to start lid-close inhibitor: {e}", level='warning')
+
+    def _stop_lid_inhibitor(self):
+        process = getattr(self, "_lid_inhibitor_process", None)
+        if process is None:
+            return
+
+        try:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=1.0)
+            self.log_message("Lid-close suspend inhibitor disabled")
+        except Exception as e:
+            self.log_message(f"Failed to stop lid-close inhibitor cleanly: {e}", level='warning')
+        finally:
+            self._lid_inhibitor_process = None
+
+    def _reconcile_from_live_state(self):
+        state = get_display_state(self.display_mgr)
+        mode = state.get("mode", "unknown")
+        lid_closed = bool(EInkControlGUI._read_live_lid_state(self))
+
+        if not hasattr(self, "_live_sync_state") or not isinstance(self._live_sync_state, dict):
+            self._live_sync_state = {
+                "display_mode": None,
+                "lid_closed": None,
+                "inhibitor_running": False,
+                "last_eink_orientation": None,
+            }
+
+        if mode == "eink":
+            EInkControlGUI._start_lid_inhibitor(self)
+        else:
+            EInkControlGUI._stop_lid_inhibitor(self)
+
+        active_display = self.display_mgr.get_active_display()
+        if active_display:
+            rotation = self.display_mgr.get_display_rotation(active_display)
+            if rotation in ("normal", "left"):
+                self._live_sync_state["last_eink_orientation"] = rotation
+
+        process = getattr(self, "_lid_inhibitor_process", None)
+        inhibitor_running = bool(process is not None and process.poll() is None)
+
+        self._live_sync_state["display_mode"] = mode
+        self._live_sync_state["lid_closed"] = lid_closed
+        self._live_sync_state["inhibitor_running"] = inhibitor_running
+
+        # GUI is still updated from live state on Tk thread.
+        self.sync_ui_from_display_state()
+        return dict(self._live_sync_state)
+
+    def _start_event_watcher(self):
+        if getattr(self, "_event_watcher_process", None):
+            return
+
+        parent_conn, child_conn = Pipe(duplex=False)
+        process = Process(target=watch_events, args=(child_conn,), daemon=True)
+        process.start()
+        child_conn.close()
+
+        self._event_watcher_conn = parent_conn
+        self._event_watcher_process = process
+
+    def _stop_event_watcher(self):
+        conn = getattr(self, "_event_watcher_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._event_watcher_conn = None
+
+        process = getattr(self, "_event_watcher_process", None)
+        if process is not None:
+            try:
+                if process.is_alive():
+                    process.terminate()
+                process.join(timeout=1.0)
+            except Exception as e:
+                self.logger.debug(f"Failed stopping event watcher process: {e}")
+            self._event_watcher_process = None
+
+    def _drain_event_watcher_notifications(self):
+        conn = getattr(self, "_event_watcher_conn", None)
+        if conn is None:
+            return
+
+        while conn.poll():
+            message = conn.recv()
+            event_type, payload = message if isinstance(message, tuple) and len(message) == 2 else (None, None)
+            if event_type in ("lid", "randr"):
+                self.root.after(0, self._reconcile_from_live_state)
+                continue
+            if event_type == "error":
+                self.log_message(f"Event watcher error: {payload}", level='error')
+
+    def _schedule_event_watcher_poll(self):
+        EInkControlGUI._drain_event_watcher_notifications(self)
+        self._event_watcher_poll_job = self.root.after(250, lambda: EInkControlGUI._schedule_event_watcher_poll(self))
 
     # === Event Handlers ===
     
@@ -1137,6 +1305,13 @@ class EInkControlGUI:
 
         # Stop refresh timer
         self._stop_refresh_timer()
+
+        poll_job = getattr(self, "_event_watcher_poll_job", None)
+        if poll_job:
+            self.root.after_cancel(poll_job)
+            self._event_watcher_poll_job = None
+        EInkControlGUI._stop_event_watcher(self)
+        EInkControlGUI._stop_lid_inhibitor(self)
 
         # Disconnect from helper client socket
         if self.helper.is_connected():

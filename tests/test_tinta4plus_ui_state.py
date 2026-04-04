@@ -268,6 +268,21 @@ class OrientationUiTests(unittest.TestCase):
 
         apply_mode.assert_called_once_with(gui.logger, "oled")
 
+    def test_toggle_orientation_runs_touch_recovery_for_current_target(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-1"
+        gui.display_mgr.get_display_rotation.side_effect = ["normal", "normal", "left"]
+        gui.display_mgr.set_display_rotation.return_value = True
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
+             patch.object(Tinta4Plus, "_apply_input_mode", return_value=True), \
+             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch, \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+            Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
+
+        ensure_touch.assert_called_once_with(gui.logger, "oled")
+
     def test_toggle_orientation_updates_ui_after_confirming_live_rotation(self):
         gui = self.make_gui()
         gui.display_mgr.get_active_display.return_value = "eDP-1"
@@ -330,6 +345,198 @@ class FrontlightRecoveryTests(unittest.TestCase):
         self.assertEqual(gui.brightness_scale.cget("state"), "disabled")
         self.assertTrue(gui.secure_boot_warning.grid_called)
         gui.sync_frontlight_state.assert_not_called()
+
+
+class LiveStateReconcilerTests(unittest.TestCase):
+    def make_gui(self):
+        gui = type("GuiStub", (), {})()
+        gui.display_mgr = MagicMock()
+        gui.logger = MagicMock()
+        gui.log_message = MagicMock()
+        gui.update_status = MagicMock()
+        gui.sync_ui_from_display_state = MagicMock()
+        return gui
+
+    def test_reconciler_tracks_display_lid_inhibitor_and_orientation_state(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-2"
+        gui.display_mgr.get_display_rotation.return_value = "left"
+
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "eink"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=True), \
+             patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc):
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        self.assertEqual(gui._live_sync_state["display_mode"], "eink")
+        self.assertTrue(gui._live_sync_state["lid_closed"])
+        self.assertTrue(gui._live_sync_state["inhibitor_running"])
+        self.assertEqual(gui._live_sync_state["last_eink_orientation"], "left")
+
+    def test_reconciler_reads_live_display_and_lid_state(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = None
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}) as get_state, \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=False) as get_lid:
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        get_state.assert_called_once_with(gui.display_mgr)
+        get_lid.assert_called_once()
+
+
+class InhibitorLifecycleTests(unittest.TestCase):
+    def make_gui(self):
+        gui = type("GuiStub", (), {})()
+        gui.display_mgr = MagicMock()
+        gui.display_mgr.get_active_display.return_value = None
+        gui.sync_ui_from_display_state = MagicMock()
+        gui.logger = MagicMock()
+        gui.log_message = MagicMock()
+        return gui
+
+    def test_reconciler_starts_lid_inhibitor_when_eink_becomes_active(self):
+        gui = self.make_gui()
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "eink"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=False), \
+             patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc) as popen:
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        popen.assert_called_once()
+        self.assertTrue(gui._live_sync_state["inhibitor_running"])
+
+    def test_reconciler_stops_lid_inhibitor_when_display_leaves_eink(self):
+        gui = self.make_gui()
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+        gui._lid_inhibitor_process = fake_proc
+        gui._live_sync_state = {
+            "display_mode": "eink",
+            "lid_closed": False,
+            "inhibitor_running": True,
+            "last_eink_orientation": None,
+        }
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=False):
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        fake_proc.terminate.assert_called_once()
+        self.assertFalse(gui._live_sync_state["inhibitor_running"])
+
+    def test_reconciler_does_not_spawn_duplicate_lid_inhibitors(self):
+        gui = self.make_gui()
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "eink"}), \
+             patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=False), \
+             patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc) as popen:
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+            Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
+
+        popen.assert_called_once()
+
+
+class EventWatcherLifecycleTests(unittest.TestCase):
+    def make_gui(self):
+        gui = type("GuiStub", (), {})()
+        gui.logger = MagicMock()
+        gui.log_message = MagicMock()
+        gui.root = type("Root", (), {"after": MagicMock()})()
+        return gui
+
+    def test_start_and_stop_event_watcher_process(self):
+        gui = self.make_gui()
+        fake_parent = MagicMock()
+        fake_child = MagicMock()
+        fake_process = MagicMock()
+
+        with patch.object(Tinta4Plus, "Pipe", return_value=(fake_parent, fake_child)) as make_pipe, \
+             patch.object(Tinta4Plus, "Process", return_value=fake_process) as make_process:
+            Tinta4Plus.EInkControlGUI._start_event_watcher(gui)
+            Tinta4Plus.EInkControlGUI._stop_event_watcher(gui)
+
+        make_pipe.assert_called_once_with(duplex=False)
+        make_process.assert_called_once()
+        fake_process.start.assert_called_once()
+        fake_parent.close.assert_called_once()
+        fake_child.close.assert_called_once()
+        fake_process.join.assert_called_once()
+
+    def test_event_watcher_uses_single_ipc_channel(self):
+        gui = self.make_gui()
+        fake_parent = MagicMock()
+        fake_child = MagicMock()
+
+        with patch.object(Tinta4Plus, "Pipe", return_value=(fake_parent, fake_child)), \
+             patch.object(Tinta4Plus, "Process", return_value=MagicMock()) as make_process:
+            Tinta4Plus.EInkControlGUI._start_event_watcher(gui)
+
+        kwargs = make_process.call_args.kwargs
+        self.assertEqual(kwargs["args"], (fake_child,))
+
+    def test_event_watcher_helper_notification_shapes(self):
+        import event_watcher
+
+        sent = []
+        event_watcher.send_lid_invalidation(sent.append)
+        event_watcher.send_randr_invalidation(sent.append)
+        event_watcher.send_error(sent.append, "boom")
+
+        self.assertEqual(sent[0], ("lid", None))
+        self.assertEqual(sent[1], ("randr", None))
+        self.assertEqual(sent[2], ("error", "boom"))
+
+
+class EventWatcherNotificationTests(unittest.TestCase):
+    def make_gui(self):
+        gui = type("GuiStub", (), {})()
+        gui.logger = MagicMock()
+        gui.log_message = MagicMock()
+        gui._reconcile_from_live_state = MagicMock()
+        gui.root = type("Root", (), {"after": MagicMock(side_effect=lambda _delay, callback: callback())})()
+        return gui
+
+    def test_lid_and_randr_notifications_schedule_tk_thread_reconcile(self):
+        gui = self.make_gui()
+        conn = MagicMock()
+        conn.poll.side_effect = [True, True, False]
+        conn.recv.side_effect = [("lid", None), ("randr", None)]
+        gui._event_watcher_conn = conn
+
+        Tinta4Plus.EInkControlGUI._drain_event_watcher_notifications(gui)
+
+        self.assertEqual(gui._reconcile_from_live_state.call_count, 2)
+
+    def test_notification_drain_does_not_do_direct_side_effects(self):
+        gui = self.make_gui()
+        gui.sync_ui_from_display_state = MagicMock()
+        conn = MagicMock()
+        conn.poll.side_effect = [True, False]
+        conn.recv.return_value = ("lid", None)
+        gui._event_watcher_conn = conn
+
+        Tinta4Plus.EInkControlGUI._drain_event_watcher_notifications(gui)
+
+        gui.sync_ui_from_display_state.assert_not_called()
+
+    def test_error_notification_is_logged_without_crash(self):
+        gui = self.make_gui()
+        conn = MagicMock()
+        conn.poll.side_effect = [True, False]
+        conn.recv.return_value = ("error", "watcher failed")
+        gui._event_watcher_conn = conn
+
+        Tinta4Plus.EInkControlGUI._drain_event_watcher_notifications(gui)
+
+        gui.log_message.assert_called_once()
+        gui._reconcile_from_live_state.assert_not_called()
 
 
 if __name__ == "__main__":
