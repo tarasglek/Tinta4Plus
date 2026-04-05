@@ -25,10 +25,15 @@ def setup_logger():
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(logging.Formatter("%(message)s"))
 
-    file_handler = logging.FileHandler(LOG_FILE, mode='a')
-    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    handlers = [stream_handler]
+    try:
+        file_handler = logging.FileHandler(LOG_FILE, mode='a')
+        file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        handlers.append(file_handler)
+    except Exception as e:
+        print(f"Warning: could not open {LOG_FILE} for append logging: {e}", file=sys.stderr)
 
-    logger.handlers = [stream_handler, file_handler]
+    logger.handlers = handlers
     return logger
 
 

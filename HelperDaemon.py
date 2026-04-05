@@ -354,9 +354,8 @@ def main():
 
     log_handlers = [
         logging.StreamHandler(sys.stderr),
-        logging.FileHandler('/tmp/TintaHelper.log', mode='a')
     ]
-    logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=log_handlers)
+    logging.basicConfig(level=LOG_LEVEL, format='%(name)s - %(levelname)s - %(message)s', handlers=log_handlers)
     logger = logging.getLogger('tinta4plus-helper')
 
     def handle_exception(exc_type, exc_value, exc_traceback):
