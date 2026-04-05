@@ -694,11 +694,10 @@ class EInkControlGUI:
             if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
                 self.update_status("Connected to helper daemon")
                 self.log_message("Connected to helper daemon")
-                self.sync_ui_from_display_state()
-                EInkControlGUI.sync_orientation_from_display_state(self)
                 EInkControlGUI._start_event_watcher(self)
                 if getattr(self, "_event_watcher_poll_job", None) is None:
                     EInkControlGUI._schedule_event_watcher_poll(self)
+                self._reconcile_from_live_state()
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -727,11 +726,10 @@ class EInkControlGUI:
             if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
                 self.log_message("✓ Reconnected to helper daemon")
                 self.update_status("Reconnected to helper daemon")
-                self.sync_ui_from_display_state()
-                EInkControlGUI.sync_orientation_from_display_state(self)
                 EInkControlGUI._start_event_watcher(self)
                 if getattr(self, "_event_watcher_poll_job", None) is None:
                     EInkControlGUI._schedule_event_watcher_poll(self)
+                self._reconcile_from_live_state()
                 self.root.after(500, self.check_ec_status)
                 return
         except Exception as e:
@@ -882,7 +880,7 @@ class EInkControlGUI:
             return
 
         self._last_activation_reconcile_at = now
-        reconcile_touch(self.logger, self.display_mgr, reason="window_activation")
+        self._reconcile_from_live_state()
 
     def _ensure_floating_refresh_button(self):
         if self.floating_refresh_button:
@@ -1062,6 +1060,10 @@ class EInkControlGUI:
         finally:
             self._lid_inhibitor_process = None
 
+    # Single policy owner for live E-Ink usability.
+    # Startup/reconnect/mode-switch/lid/RandR/activation triggers must feed into this
+    # reconciler instead of duplicating touch, inhibitor, or orientation policy elsewhere.
+    # This function is intentionally idempotent and safe to call frequently.
     def _reconcile_from_live_state(self):
         state = get_display_state(self.display_mgr)
         mode = state.get("mode", "unknown")
@@ -1208,7 +1210,7 @@ class EInkControlGUI:
                 brightness_level=self.brightness_var.get(),
             )
             if ok:
-                self.sync_ui_from_display_state()
+                self._reconcile_from_live_state()
             else:
                 self.log_message("⚠ Failed to switch to E-Ink", level='error')
             return
@@ -1222,7 +1224,7 @@ class EInkControlGUI:
             script_dir=os.path.dirname(os.path.abspath(__file__)),
         )
         if ok:
-            self.sync_ui_from_display_state()
+            self._reconcile_from_live_state()
         else:
             self.log_message("⚠ Failed to switch to OLED", level='error')
     

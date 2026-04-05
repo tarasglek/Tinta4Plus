@@ -105,7 +105,7 @@ class UiStateSyncTests(unittest.TestCase):
 
 
 class GuiLifecycleSyncTests(unittest.TestCase):
-    def test_initialize_helper_syncs_ui_after_successful_connect(self):
+    def test_initialize_helper_requests_live_state_reconcile_after_successful_connect(self):
         gui = type("GuiStub", (), {})()
         gui._prompt_install_or_upgrade = MagicMock(return_value=True)
         gui.helper = MagicMock()
@@ -117,14 +117,16 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.root = type("Root", (), {"after": MagicMock()})()
         gui.check_ec_status = MagicMock()
         gui.sync_ui_from_display_state = MagicMock()
+        gui._reconcile_from_live_state = MagicMock()
 
+        # Helper init is also a trigger: it must request one reconcile after connect.
         with patch.object(Tinta4Plus.EInkControlGUI, "_start_event_watcher"), \
              patch.object(Tinta4Plus.EInkControlGUI, "_schedule_event_watcher_poll"):
             Tinta4Plus.EInkControlGUI.initialize_helper(gui)
 
-        gui.sync_ui_from_display_state.assert_called_once()
+        gui._reconcile_from_live_state.assert_called_once()
 
-    def test_attempt_helper_restart_syncs_ui_after_successful_reconnect(self):
+    def test_attempt_helper_restart_requests_live_state_reconcile_after_successful_reconnect(self):
         gui = type("GuiStub", (), {})()
         gui.log_message = MagicMock()
         gui.helper = MagicMock()
@@ -137,15 +139,16 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.root = type("Root", (), {"after": MagicMock()})()
         gui.check_ec_status = MagicMock()
         gui.sync_ui_from_display_state = MagicMock()
+        gui._reconcile_from_live_state = MagicMock()
 
         with patch.object(Tinta4Plus.time, "sleep", return_value=None), \
              patch.object(Tinta4Plus.EInkControlGUI, "_start_event_watcher"), \
              patch.object(Tinta4Plus.EInkControlGUI, "_schedule_event_watcher_poll"):
             Tinta4Plus.EInkControlGUI.attempt_helper_restart(gui)
 
-        gui.sync_ui_from_display_state.assert_called_once()
+        gui._reconcile_from_live_state.assert_called_once()
 
-    def test_toggle_to_eink_uses_sync_ui_on_success(self):
+    def test_toggle_to_eink_requests_live_state_reconcile_on_success(self):
         gui = type("GuiStub", (), {})()
         gui.eink_enabled_var = FakeVar(False)
         gui.display_mgr = object()
@@ -155,6 +158,7 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.autoswitch_theme_var = FakeVar(True)
         gui.brightness_var = FakeVar(4)
         gui.sync_ui_from_display_state = MagicMock()
+        gui._reconcile_from_live_state = MagicMock()
         gui.log_message = MagicMock()
         gui.root = object()
         gui.on_refresh_full = MagicMock()
@@ -170,9 +174,9 @@ class GuiLifecycleSyncTests(unittest.TestCase):
              patch.object(Tinta4Plus, "FloatingRefreshButton", MagicMock()):
             Tinta4Plus.EInkControlGUI.on_eink_toggled(gui)
 
-        gui.sync_ui_from_display_state.assert_called_once()
+        gui._reconcile_from_live_state.assert_called_once()
 
-    def test_toggle_to_oled_uses_sync_ui_on_success(self):
+    def test_toggle_to_oled_requests_live_state_reconcile_on_success(self):
         gui = type("GuiStub", (), {})()
         gui.eink_enabled_var = FakeVar(True)
         gui.display_mgr = object()
@@ -181,6 +185,7 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         gui.display_scale = 1.75
         gui.autoswitch_theme_var = FakeVar(True)
         gui.sync_ui_from_display_state = MagicMock()
+        gui._reconcile_from_live_state = MagicMock()
         gui.log_message = MagicMock()
         gui._stop_refresh_timer = MagicMock()
         gui.floating_refresh_button = None
@@ -193,7 +198,7 @@ class GuiLifecycleSyncTests(unittest.TestCase):
         with patch.object(Tinta4Plus, "switch_to_oled", return_value=True):
             Tinta4Plus.EInkControlGUI.on_eink_toggled(gui)
 
-        gui.sync_ui_from_display_state.assert_called_once()
+        gui._reconcile_from_live_state.assert_called_once()
 
     def test_on_closing_does_not_toggle_display_mode(self):
         gui = type("GuiStub", (), {})()
@@ -719,20 +724,19 @@ class ActivationTouchReconcileTests(unittest.TestCase):
         gui.root = MagicMock()
         gui.floating_refresh_button = None
         gui.on_refresh_full = MagicMock()
+        gui._reconcile_from_live_state = MagicMock()
         return gui
 
-    def test_main_window_activation_runs_reconcile_with_derived_target(self):
+    def test_main_window_activation_requests_live_state_reconcile(self):
         gui = self.make_gui()
 
+        # Activation is a trigger only: policy execution must happen inside reconciler.
         with patch.object(Tinta4Plus.time, "monotonic", return_value=100.0), \
              patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch:
             Tinta4Plus.EInkControlGUI._on_window_activated(gui)
 
-        reconcile_touch.assert_called_once_with(
-            gui.logger,
-            gui.display_mgr,
-            reason="window_activation",
-        )
+        gui._reconcile_from_live_state.assert_called_once_with()
+        reconcile_touch.assert_not_called()
 
     def test_main_window_activation_debounce_skips_rapid_duplicates(self):
         gui = self.make_gui()
@@ -743,20 +747,18 @@ class ActivationTouchReconcileTests(unittest.TestCase):
             Tinta4Plus.EInkControlGUI._on_window_activated(gui)
             Tinta4Plus.EInkControlGUI._on_window_activated(gui)
 
-        self.assertEqual(reconcile_touch.call_count, 2)
+        self.assertEqual(gui._reconcile_from_live_state.call_count, 2)
+        reconcile_touch.assert_not_called()
 
-    def test_main_window_activation_handles_skipped_modes_cleanly(self):
+    def test_main_window_activation_non_eink_stays_noop_through_reconcile(self):
         gui = self.make_gui()
 
         with patch.object(Tinta4Plus.time, "monotonic", return_value=100.0), \
              patch.object(Tinta4Plus, "reconcile_touch", return_value=False) as reconcile_touch:
             Tinta4Plus.EInkControlGUI._on_window_activated(gui)
 
-        reconcile_touch.assert_called_once_with(
-            gui.logger,
-            gui.display_mgr,
-            reason="window_activation",
-        )
+        gui._reconcile_from_live_state.assert_called_once_with()
+        reconcile_touch.assert_not_called()
 
     def test_refresh_button_window_binds_same_activation_handler(self):
         gui = self.make_gui()
