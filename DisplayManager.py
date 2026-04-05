@@ -13,6 +13,7 @@ import subprocess
 import os
 import re
 import time
+import math
 
 
 class DisplayManager:
@@ -217,8 +218,8 @@ class DisplayManager:
         xrandr_scale_x = 1.0 / requested_scale
         xrandr_scale_y = 1.0 / requested_scale
 
-        logical_width = max(1, int(native_width * xrandr_scale_x))
-        logical_height = max(1, int(native_height * xrandr_scale_y))
+        logical_width = max(1, math.ceil(native_width * xrandr_scale_x))
+        logical_height = max(1, math.ceil(native_height * xrandr_scale_y))
 
         return {
             'display_name': display_name,
@@ -337,12 +338,11 @@ class DisplayManager:
         fb_height = actual['framebuffer_height']
         if fb_width is None or fb_height is None:
             mismatches['framebuffer'] = {'expected': 'present', 'actual': None}
-        else:
-            if fb_width < expected_width or fb_height < expected_height:
-                mismatches['framebuffer_too_small'] = {
-                    'expected_min': f"{expected_width}x{expected_height}",
-                    'actual': f"{fb_width}x{fb_height}",
-                }
+        elif fb_width != expected_width or fb_height != expected_height:
+            mismatches['framebuffer_size'] = {
+                'expected': f"{expected_width}x{expected_height}",
+                'actual': f"{fb_width}x{fb_height}",
+            }
 
         if actual['output_width'] != expected_width or actual['output_height'] != expected_height:
             mismatches['output_geometry'] = {
@@ -385,46 +385,40 @@ class DisplayManager:
         cmd = ['xrandr', '--output', display_name, '--auto']
         return self._run_xrandr_apply_command(display_name, cmd)
 
+    def _activate_display_transition_safe(self, display_name, scale=None):
+        """Activate output without forcing a compact single-output framebuffer."""
+        target_state = self._build_display_target_state(display_name, scale)
+        if not target_state:
+            self.logger.warning(f"Unknown display {display_name}, using auto mode")
+            return self._run_xrandr_apply_command(display_name, ['xrandr', '--output', display_name, '--auto'])
+
+        scale_x = target_state['xrandr_scale_x']
+        scale_y = target_state['xrandr_scale_y']
+        scale_text = '1x1' if scale_x == 1.0 and scale_y == 1.0 else f'{scale_x}x{scale_y}'
+
+        cmd = [
+            'xrandr', '--output', display_name,
+            '--mode', f"{target_state['native_width']}x{target_state['native_height']}",
+            '--scale', scale_text,
+        ]
+        return self._run_xrandr_apply_command(display_name, cmd)
+
     def enable_display(self, display_name, scale=None):
         """Enable/turn on a display with optional scaling.
 
         Args:
             display_name: Name of the display (e.g., 'eDP-1', 'eDP-2')
             scale: Optional scale factor (e.g., 1.60 means UI appears 1.6x larger, lower DPI)
-                   Uses xrandr --scale with --panning and --fb for full-state transitions.
         """
         try:
-            target_state = self._build_display_target_state(display_name, scale)
-
-            if not self._apply_display_scale(display_name, scale):
+            if not self._activate_display_transition_safe(display_name, scale):
                 return False
 
             self._xrandr_cache = None
             time.sleep(self.XRANDR_APPLY_DELAY)
 
-            verified = True
-            if target_state:
-                verified = self._verify_display_target_state(display_name, target_state)
-                if not verified:
-                    self.logger.warning(
-                        f"Post-apply verification failed for {display_name}; running one recovery attempt"
-                    )
-                    if not self._reset_display_to_native_baseline(display_name):
-                        return False
-                    if not self._apply_display_target_state(target_state):
-                        return False
-
-                    self._xrandr_cache = None
-                    time.sleep(self.XRANDR_APPLY_DELAY)
-                    verified = self._verify_display_target_state(display_name, target_state)
-            else:
-                verified = self.is_display_active(display_name)
-
-            if not verified:
-                self.logger.error(
-                    f"Failed to enable display: {display_name} "
-                    "(verification mismatch after one recovery attempt)"
-                )
+            if not self.is_display_active(display_name):
+                self.logger.error(f"Failed to enable display: {display_name} (display not active after apply)")
                 return False
 
             scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
@@ -450,6 +444,33 @@ class DisplayManager:
 
         except Exception as e:
             self.logger.error(f"Failed to enable display: {e}")
+            return False
+    def finalize_single_display(self, display_name, scale=None):
+        """Apply and verify the final compact single-output RandR state."""
+        try:
+            target_state = self._build_display_target_state(display_name, scale)
+            if not target_state:
+                self.logger.error(f"Cannot finalize unknown display: {display_name}")
+                return False
+
+            self.logger.info(f"Finalizing single-display layout for {display_name}: {target_state}")
+            if not self._apply_display_target_state(target_state):
+                return False
+
+            self._xrandr_cache = None
+            time.sleep(self.XRANDR_APPLY_DELAY)
+
+            if not self._verify_display_target_state(display_name, target_state):
+                self.logger.error(f"Failed to finalize single-display layout for {display_name}")
+                return False
+
+            self.logger.info(
+                f"Finalized single-display layout for {display_name}: "
+                f"{target_state['logical_width']}x{target_state['logical_height']}"
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to finalize display layout: {e}")
             return False
     
     def disable_display(self, display_name):
