@@ -166,6 +166,96 @@ class DisplayManager:
             self.logger.error(f"Failed to set display rotation: {e}")
             return False
 
+    def get_effective_display_scale(self, display_name):
+        """Return current app-convention scale for a display, or None when ambiguous."""
+        xrandr_output = self._get_xrandr_output()
+        if not xrandr_output:
+            return None
+
+        native_resolution = self.DISPLAY_RESOLUTIONS.get(display_name)
+        if not native_resolution:
+            return None
+
+        native_width, native_height = native_resolution
+
+        for line in xrandr_output.split('\n'):
+            if not re.search(rf"^{re.escape(display_name)}\\s+connected\\b", line):
+                continue
+
+            geometry_match = re.search(r"\b(\d+)x(\d+)\+\d+\+\d+\b", line)
+            if not geometry_match:
+                return None
+
+            current_width = int(geometry_match.group(1))
+            current_height = int(geometry_match.group(2))
+            if current_width <= 0 or current_height <= 0:
+                return None
+
+            width_scale = native_width / current_width
+            height_scale = native_height / current_height
+
+            # Conservative parsing: width/height must agree closely.
+            if abs(width_scale - height_scale) > 0.05:
+                return None
+
+            return (width_scale + height_scale) / 2.0
+
+        return None
+
+    def _apply_display_scale(self, display_name, scale=None):
+        """Apply one xrandr scale configuration to the provided display."""
+        native_resolution = self.DISPLAY_RESOLUTIONS.get(display_name)
+        cmd = ['xrandr', '--output', display_name]
+
+        if native_resolution:
+            native_width, native_height = native_resolution
+            cmd.extend(['--mode', f'{native_width}x{native_height}'])
+
+            if scale is None or scale == 1.0:
+                cmd.extend(['--panning', f'{native_width}x{native_height}'])
+                cmd.extend(['--scale', '1x1'])
+            else:
+                if scale <= 0:
+                    self.logger.error(f"Invalid scale {scale} for {display_name}")
+                    return False
+
+                # Our convention: scale=1.6 means "UI appears 1.6x larger" (lower effective DPI)
+                # xrandr convention: --scale 1.6 means "zoom out" (UI appears smaller)
+                # These are OPPOSITE, so we invert for xrandr.
+                scale_inv = 1.0 / scale
+                panning_width = int(native_width * scale_inv)
+                panning_height = int(native_height * scale_inv)
+
+                cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
+                cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
+                self.logger.info(
+                    f"Scaling: virtual desktop {panning_width}x{panning_height}, "
+                    f"xrandr scale {scale_inv:.3f}x{scale_inv:.3f} (our scale={scale}), "
+                    f"physical {native_width}x{native_height}"
+                )
+        else:
+            self.logger.warning(f"Unknown display {display_name}, using auto mode")
+            cmd.append('--auto')
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=self.XRANDR_TIMEOUT
+            )
+            if result.returncode != 0:
+                self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr}")
+                return False
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"xrandr enable command timed out after {self.XRANDR_TIMEOUT}s")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to run xrandr enable command: {e}")
+            return False
+
+        self._xrandr_cache = None
+        return True
+
     def enable_display(self, display_name, scale=None):
         """Enable/turn on a display with optional scaling
 
@@ -176,74 +266,34 @@ class DisplayManager:
                    This keeps touch input properly mapped.
         """
         try:
-            # Determine native resolution from display name mapping
-            if display_name in self.DISPLAY_RESOLUTIONS:
-                native_width, native_height = self.DISPLAY_RESOLUTIONS[display_name]
-            else:
-                self.logger.warning(f"Unknown display {display_name}, using auto mode")
-                native_width, native_height = None, None
+            should_reset_to_native = False
 
-            # Build xrandr command
-            cmd = ['xrandr', '--output', display_name]
+            if scale is not None and scale != 1.0:
+                current_scale = self.get_effective_display_scale(display_name)
+                if current_scale is not None and scale < current_scale:
+                    should_reset_to_native = True
+                    self.logger.info(
+                        f"Lowering scale on {display_name}: reset to 1.0 before applying {scale} "
+                        f"(current≈{current_scale:.3f})"
+                    )
 
-            if native_width and native_height:
-                # Always specify the exact mode for predictable behavior
-                cmd.extend(['--mode', f'{native_width}x{native_height}'])
-
-                if scale is not None and scale != 1.0:
-                    # Our convention: scale=1.6 means "UI appears 1.6x larger" (lower effective DPI)
-                    # xrandr convention: --scale 1.6 means "zoom out" (UI appears smaller)
-                    # These are OPPOSITE, so we invert for xrandr
-                    scale_inv = 1.0 / scale
-
-                    # Calculate panning size (virtual desktop size)
-                    # For our scale=1.6 (larger UI), we want SMALLER virtual desktop
-                    # Virtual size = native / our_scale = native * scale_inv
-                    panning_width = int(native_width * scale_inv)
-                    panning_height = int(native_height * scale_inv)
-
-                    # xrandr will scale UP this smaller virtual desktop to fill the physical panel
-                    # We pass scale_inv to xrandr because it's inverted from our convention
-                    cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
-                    cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
-                    self.logger.info(f"Scaling: virtual desktop {panning_width}x{panning_height}, "
-                                   f"xrandr scale {scale_inv:.3f}x{scale_inv:.3f} (our scale={scale}), "
-                                   f"physical {native_width}x{native_height}")
-                else:
-                    # No scaling - use native resolution with 1:1 scale
-                    cmd.extend(['--panning', f'{native_width}x{native_height}'])
-                    cmd.extend(['--scale', '1x1'])
-            else:
-                # Fallback to auto mode if we don't know the resolution
-                cmd.append('--auto')
-
-            # Run xrandr command (may produce spurious BadMatch errors on stderr)
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    timeout=self.XRANDR_TIMEOUT
-                )
-                if result.returncode != 0:
-                    self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr}")
-            except subprocess.TimeoutExpired:
-                self.logger.error(f"xrandr enable command timed out after {self.XRANDR_TIMEOUT}s")
+            if should_reset_to_native and not self._apply_display_scale(display_name, 1.0):
                 return False
-            
-            # Invalidate cache since display state changed
+
+            if not self._apply_display_scale(display_name, scale):
+                return False
+
+            # Preserve existing verification behavior after enable.
             self._xrandr_cache = None
-            
-            # Verify the display is actually enabled by checking its state
-            # Give X11 a moment to apply the change
             time.sleep(self.XRANDR_APPLY_DELAY)
 
             if self.is_display_active(display_name):
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
                 self.logger.info(f"Enabled display: {display_name}{scale_info}")
                 return True
-            else:
-                self.logger.error(f"Failed to enable display: {display_name} (display not active after command)")
-                return False
+
+            self.logger.error(f"Failed to enable display: {display_name} (display not active after command)")
+            return False
 
         except Exception as e:
             self.logger.error(f"Failed to enable display: {e}")

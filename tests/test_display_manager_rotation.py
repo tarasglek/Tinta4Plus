@@ -63,6 +63,53 @@ eDP-1 connected primary 1800x2880+0+0 right (normal left inverted right x axis y
         )
         self.assertIsNone(self.manager._xrandr_cache)
 
+    def test_enable_display_lower_scale_resets_to_one_then_applies_target_scale(self):
+        with patch.object(self.manager, "get_effective_display_scale", return_value=1.9, create=True), \
+             patch.object(self.manager, "is_display_active", return_value=True), \
+             patch("DisplayManager.time.sleep"), \
+             patch("DisplayManager.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+
+            ok = self.manager.enable_display("eDP-1", scale=1.5)
+
+        self.assertTrue(ok)
+        self.assertEqual(run_mock.call_count, 2)
+
+        first_cmd = run_mock.call_args_list[0].args[0]
+        second_cmd = run_mock.call_args_list[1].args[0]
+
+        self.assertEqual(first_cmd[0:3], ["xrandr", "--output", "eDP-1"])
+        self.assertIn("--scale", first_cmd)
+        self.assertIn("1x1", first_cmd)
+
+        self.assertEqual(second_cmd[0:3], ["xrandr", "--output", "eDP-1"])
+        self.assertIn("--scale", second_cmd)
+        self.assertNotIn("1x1", second_cmd)
+
+    def test_enable_display_higher_scale_applies_once(self):
+        with patch.object(self.manager, "get_effective_display_scale", return_value=1.5, create=True), \
+             patch.object(self.manager, "is_display_active", return_value=True), \
+             patch("DisplayManager.time.sleep"), \
+             patch("DisplayManager.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+
+            ok = self.manager.enable_display("eDP-1", scale=1.9)
+
+        self.assertTrue(ok)
+        self.assertEqual(run_mock.call_count, 1)
+
+    def test_enable_display_unknown_current_scale_applies_once(self):
+        with patch.object(self.manager, "get_effective_display_scale", return_value=None, create=True), \
+             patch.object(self.manager, "is_display_active", return_value=True), \
+             patch("DisplayManager.time.sleep"), \
+             patch("DisplayManager.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+
+            ok = self.manager.enable_display("eDP-1", scale=1.5)
+
+        self.assertTrue(ok)
+        self.assertEqual(run_mock.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
