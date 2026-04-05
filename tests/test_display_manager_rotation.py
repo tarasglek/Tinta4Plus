@@ -110,6 +110,20 @@ eDP-1 connected primary 1800x2880+0+0 right (normal left inverted right x axis y
         self.assertTrue(ok)
         self.assertEqual(run_mock.call_count, 1)
 
+    def test_enable_display_tolerates_nonzero_xrandr_when_output_becomes_active(self):
+        with patch.object(self.manager, "get_effective_display_scale", return_value=None, create=True), \
+             patch.object(self.manager, "is_display_active", return_value=True), \
+             patch("DisplayManager.time.sleep"), \
+             patch("DisplayManager.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 1
+            run_mock.return_value.stderr = b"X Error of failed request:  BadMatch"
+
+            ok = self.manager.enable_display("eDP-2", scale=1.75)
+
+        self.assertTrue(ok)
+        self.assertEqual(run_mock.call_count, 1)
+        self.logger.warning.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()

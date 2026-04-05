@@ -244,8 +244,10 @@ class DisplayManager:
                 timeout=self.XRANDR_TIMEOUT
             )
             if result.returncode != 0:
-                self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr}")
-                return False
+                self.logger.warning(
+                    f"xrandr returned {result.returncode}: {result.stderr}; "
+                    "continuing and verifying display state"
+                )
         except subprocess.TimeoutExpired:
             self.logger.error(f"xrandr enable command timed out after {self.XRANDR_TIMEOUT}s")
             return False
