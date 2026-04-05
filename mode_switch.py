@@ -192,6 +192,30 @@ def ensure_touch_available(logger, target):
     return False
 
 
+def reconcile_touch(logger, display_mgr, target=None, reason="unspecified"):
+    resolved_target = target
+
+    if resolved_target is None:
+        mode = get_display_state(display_mgr).get("mode")
+        if mode in ("eink", "oled"):
+            resolved_target = mode
+        else:
+            logger.info(f"Touch reconcile skipped (reason={reason}, mode={mode})")
+            return False
+
+    if resolved_target not in ("eink", "oled"):
+        logger.warning(f"Touch reconcile skipped (reason={reason}, invalid_target={resolved_target})")
+        return False
+
+    recovered = ensure_touch_available(logger, resolved_target)
+    if recovered:
+        logger.info(f"Touch reconcile succeeded (reason={reason}, target={resolved_target})")
+        return True
+
+    logger.warning(f"Touch reconcile failed (reason={reason}, target={resolved_target})")
+    return False
+
+
 def _apply_input_mode(logger, target):
     devices = _list_xinput_devices(logger)
     if not devices:
@@ -461,7 +485,7 @@ def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
         logger.warning("Failed to apply E-Ink input mode; continuing display switch")
 
     apply_stored_orientation(display_mgr, logger, target="eink")
-    ensure_touch_available(logger, "eink")
+    reconcile_touch(logger, display_mgr, target="eink", reason="switch_to_eink")
 
     logger.info("Now using E-Ink")
     return True
@@ -523,7 +547,7 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
         logger.warning("Failed to apply OLED input mode; continuing display switch")
 
     apply_stored_orientation(display_mgr, logger, target="oled")
-    ensure_touch_available(logger, "oled")
+    reconcile_touch(logger, display_mgr, target="oled", reason="switch_to_oled")
 
     logger.info("Now using OLED")
     return True

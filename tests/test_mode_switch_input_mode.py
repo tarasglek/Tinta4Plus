@@ -197,5 +197,57 @@ class ApplyInputModeTests(unittest.TestCase):
         self.logger.warning.assert_any_call("Touch still unavailable for eink after input remap retry")
 
 
+class TouchReconcilerTests(unittest.TestCase):
+    def setUp(self):
+        self.logger = MagicMock()
+        self.display_mgr = MagicMock()
+
+    def test_reconcile_touch_with_explicit_target_delegates_to_ensure_touch_available(self):
+        with patch.object(mode_switch, "ensure_touch_available", return_value=True) as ensure_touch:
+            ok = mode_switch.reconcile_touch(self.logger, self.display_mgr, target="eink", reason="switch")
+
+        self.assertTrue(ok)
+        ensure_touch.assert_called_once_with(self.logger, "eink")
+
+    def test_reconcile_touch_without_target_derives_target_from_live_mode(self):
+        with patch.object(mode_switch, "get_display_state", return_value={"mode": "oled"}) as get_state, \
+             patch.object(mode_switch, "ensure_touch_available", return_value=True) as ensure_touch:
+            ok = mode_switch.reconcile_touch(self.logger, self.display_mgr, reason="activation")
+
+        self.assertTrue(ok)
+        get_state.assert_called_once_with(self.display_mgr)
+        ensure_touch.assert_called_once_with(self.logger, "oled")
+
+    def test_reconcile_touch_skips_when_live_mode_is_mixed_or_unknown(self):
+        for mode in ("mixed", "unknown"):
+            with self.subTest(mode=mode):
+                self.logger.reset_mock()
+                with patch.object(mode_switch, "get_display_state", return_value={"mode": mode}), \
+                     patch.object(mode_switch, "ensure_touch_available", return_value=True) as ensure_touch:
+                    ok = mode_switch.reconcile_touch(self.logger, self.display_mgr, reason="activation")
+
+                self.assertFalse(ok)
+                ensure_touch.assert_not_called()
+
+    def test_reconcile_touch_logs_reason_for_success_skip_and_failure(self):
+        with patch.object(mode_switch, "ensure_touch_available", return_value=True):
+            ok_success = mode_switch.reconcile_touch(self.logger, self.display_mgr, target="eink", reason="switch-ok")
+
+        with patch.object(mode_switch, "get_display_state", return_value={"mode": "mixed"}), \
+             patch.object(mode_switch, "ensure_touch_available", return_value=True):
+            ok_skip = mode_switch.reconcile_touch(self.logger, self.display_mgr, reason="skip-path")
+
+        with patch.object(mode_switch, "ensure_touch_available", return_value=False):
+            ok_failure = mode_switch.reconcile_touch(self.logger, self.display_mgr, target="oled", reason="switch-fail")
+
+        self.assertTrue(ok_success)
+        self.assertFalse(ok_skip)
+        self.assertFalse(ok_failure)
+
+        self.logger.info.assert_any_call("Touch reconcile succeeded (reason=switch-ok, target=eink)")
+        self.logger.info.assert_any_call("Touch reconcile skipped (reason=skip-path, mode=mixed)")
+        self.logger.warning.assert_any_call("Touch reconcile failed (reason=switch-fail, target=oled)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -282,11 +282,18 @@ class OrientationUiTests(unittest.TestCase):
 
         with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
              patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch, \
              patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
             Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
             Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
 
         apply_mode.assert_called_once_with(gui.logger, "oled")
+        reconcile_touch.assert_called_once_with(
+            gui.logger,
+            gui.display_mgr,
+            target="oled",
+            reason="orientation_toggled",
+        )
 
     def test_toggle_orientation_runs_touch_recovery_for_current_target(self):
         gui = self.make_gui()
@@ -296,12 +303,42 @@ class OrientationUiTests(unittest.TestCase):
 
         with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
              patch.object(Tinta4Plus, "_apply_input_mode", return_value=True), \
-             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch, \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch, \
              patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
             Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
             Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
 
-        ensure_touch.assert_called_once_with(gui.logger, "oled")
+        reconcile_touch.assert_called_once_with(
+            gui.logger,
+            gui.display_mgr,
+            target="oled",
+            reason="orientation_toggled",
+        )
+
+    def test_toggle_orientation_applies_input_mode_before_touch_reconcile(self):
+        gui = self.make_gui()
+        gui.display_mgr.get_active_display.return_value = "eDP-1"
+        gui.display_mgr.get_display_rotation.side_effect = ["normal", "normal", "left"]
+        gui.display_mgr.set_display_rotation.return_value = True
+
+        call_order = []
+
+        def record_apply(*_args, **_kwargs):
+            call_order.append("apply")
+            return True
+
+        def record_reconcile(*_args, **_kwargs):
+            call_order.append("reconcile")
+            return True
+
+        with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
+             patch.object(Tinta4Plus, "_apply_input_mode", side_effect=record_apply), \
+             patch.object(Tinta4Plus, "reconcile_touch", side_effect=record_reconcile), \
+             patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
+            Tinta4Plus.EInkControlGUI.sync_orientation_from_display_state(gui)
+            Tinta4Plus.EInkControlGUI.on_orientation_toggled(gui)
+
+        self.assertEqual(call_order, ["apply", "reconcile"])
 
     def test_toggle_orientation_updates_ui_after_confirming_live_rotation(self):
         gui = self.make_gui()
@@ -484,13 +521,18 @@ class LidDrivenRotationTests(unittest.TestCase):
              patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=True), \
              patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc), \
              patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
-             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch, \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch, \
              patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
             Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
 
         gui.display_mgr.set_display_rotation.assert_called_once_with("eDP-2", "left")
         apply_mode.assert_called_once_with(gui.logger, "eink")
-        ensure_touch.assert_called_once_with(gui.logger, "eink")
+        reconcile_touch.assert_called_once_with(
+            gui.logger,
+            gui.display_mgr,
+            target="eink",
+            reason="lid_state_reconcile",
+        )
 
     def test_eink_plus_lid_open_rotates_to_landscape_and_recovers_touch(self):
         gui = self.make_gui()
@@ -503,13 +545,18 @@ class LidDrivenRotationTests(unittest.TestCase):
              patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=False), \
              patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc), \
              patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
-             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch, \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch, \
              patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
             Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
 
         gui.display_mgr.set_display_rotation.assert_called_once_with("eDP-2", "normal")
         apply_mode.assert_called_once_with(gui.logger, "eink")
-        ensure_touch.assert_called_once_with(gui.logger, "eink")
+        reconcile_touch.assert_called_once_with(
+            gui.logger,
+            gui.display_mgr,
+            target="eink",
+            reason="lid_state_reconcile",
+        )
 
     def test_not_eink_mode_does_not_apply_lid_driven_rotation(self):
         gui = self.make_gui()
@@ -517,12 +564,12 @@ class LidDrivenRotationTests(unittest.TestCase):
         with patch.object(Tinta4Plus, "get_display_state", return_value={"mode": "oled"}), \
              patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=True), \
              patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
-             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True) as ensure_touch:
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch:
             Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
 
         gui.display_mgr.set_display_rotation.assert_not_called()
         apply_mode.assert_not_called()
-        ensure_touch.assert_not_called()
+        reconcile_touch.assert_not_called()
 
     def test_duplicate_invalidation_with_no_effective_change_is_ignored(self):
         gui = self.make_gui()
@@ -535,7 +582,7 @@ class LidDrivenRotationTests(unittest.TestCase):
              patch.object(Tinta4Plus.EInkControlGUI, "_read_live_lid_state", return_value=True), \
              patch.object(Tinta4Plus.subprocess, "Popen", return_value=fake_proc), \
              patch.object(Tinta4Plus, "_apply_input_mode", return_value=True) as apply_mode, \
-             patch.object(Tinta4Plus, "ensure_touch_available", return_value=True), \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True), \
              patch.object(Tinta4Plus, "save_orientation_preference", return_value=True):
             Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
             Tinta4Plus.EInkControlGUI._reconcile_from_live_state(gui)
@@ -661,6 +708,68 @@ class EventWatcherNotificationTests(unittest.TestCase):
 
         self.assertIsNone(gui._event_watcher_conn)
         gui.log_message.assert_called_once()
+
+
+class ActivationTouchReconcileTests(unittest.TestCase):
+    def make_gui(self):
+        gui = type("GuiStub", (), {})()
+        gui.logger = MagicMock()
+        gui.display_mgr = MagicMock()
+        gui.log_message = MagicMock()
+        gui.root = MagicMock()
+        gui.floating_refresh_button = None
+        gui.on_refresh_full = MagicMock()
+        return gui
+
+    def test_main_window_activation_runs_reconcile_with_derived_target(self):
+        gui = self.make_gui()
+
+        with patch.object(Tinta4Plus.time, "monotonic", return_value=100.0), \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch:
+            Tinta4Plus.EInkControlGUI._on_window_activated(gui)
+
+        reconcile_touch.assert_called_once_with(
+            gui.logger,
+            gui.display_mgr,
+            reason="window_activation",
+        )
+
+    def test_main_window_activation_debounce_skips_rapid_duplicates(self):
+        gui = self.make_gui()
+
+        with patch.object(Tinta4Plus.time, "monotonic", side_effect=[10.0, 10.1, 10.8]), \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=True) as reconcile_touch:
+            Tinta4Plus.EInkControlGUI._on_window_activated(gui)
+            Tinta4Plus.EInkControlGUI._on_window_activated(gui)
+            Tinta4Plus.EInkControlGUI._on_window_activated(gui)
+
+        self.assertEqual(reconcile_touch.call_count, 2)
+
+    def test_main_window_activation_handles_skipped_modes_cleanly(self):
+        gui = self.make_gui()
+
+        with patch.object(Tinta4Plus.time, "monotonic", return_value=100.0), \
+             patch.object(Tinta4Plus, "reconcile_touch", return_value=False) as reconcile_touch:
+            Tinta4Plus.EInkControlGUI._on_window_activated(gui)
+
+        reconcile_touch.assert_called_once_with(
+            gui.logger,
+            gui.display_mgr,
+            reason="window_activation",
+        )
+
+    def test_refresh_button_window_binds_same_activation_handler(self):
+        gui = self.make_gui()
+        fake_window = MagicMock()
+        fake_button = type("FloatButtonStub", (), {"window": fake_window})()
+
+        with patch.object(Tinta4Plus, "FloatingRefreshButton", return_value=fake_button):
+            Tinta4Plus.EInkControlGUI._ensure_floating_refresh_button(gui)
+
+        self.assertIs(gui.floating_refresh_button, fake_button)
+        fake_window.bind.assert_called_once()
+        bind_args = fake_window.bind.call_args[0]
+        self.assertEqual(bind_args[0], "<FocusIn>")
 
 
 if __name__ == "__main__":

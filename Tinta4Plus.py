@@ -37,8 +37,8 @@ from HelperClient import HelperClient
 from DisplayManager import DisplayManager
 from mode_switch import (
     _apply_input_mode,
-    ensure_touch_available,
     get_display_state,
+    reconcile_touch,
     save_orientation_preference,
     switch_to_eink,
     switch_to_oled,
@@ -178,6 +178,7 @@ class FloatingRefreshButton:
 class EInkControlGUI:
     # Version
     VERSION = "0.1.0 alpha"
+    ACTIVATION_RECONCILE_DEBOUNCE_SECONDS = 0.5
 
     # Configuration
     SOCKET_PATH = '/run/tinta4plus.sock'
@@ -246,6 +247,9 @@ class EInkControlGUI:
 
         # Build UI
         self.build_ui()
+        self._last_activation_reconcile_at = None
+
+        EInkControlGUI._bind_activation_reconcile(self, self.root)
 
         # Apply loaded settings to UI controls after they're created
         self.scale_var.set(self.display_scale)
@@ -857,12 +861,36 @@ class EInkControlGUI:
             self.show_error_dialog(f"Command '{command}' error:\n\n{e}")
             return None
     
+    def _bind_activation_reconcile(self, window):
+        if window is None:
+            return
+
+        handler = getattr(self, "_on_window_activated", None)
+        if handler is None:
+            handler = lambda event: EInkControlGUI._on_window_activated(self, event)
+
+        try:
+            window.bind("<FocusIn>", handler, add="+")
+        except Exception as e:
+            self.logger.debug(f"Failed to bind activation reconcile handler: {e}")
+
+    def _on_window_activated(self, _event=None):
+        now = time.monotonic()
+        last_run = getattr(self, "_last_activation_reconcile_at", None)
+        debounce_window = getattr(self, "ACTIVATION_RECONCILE_DEBOUNCE_SECONDS", 0.5)
+        if last_run is not None and now - last_run < debounce_window:
+            return
+
+        self._last_activation_reconcile_at = now
+        reconcile_touch(self.logger, self.display_mgr, reason="window_activation")
+
     def _ensure_floating_refresh_button(self):
         if self.floating_refresh_button:
             return
 
         self.log_message("Creating floating refresh button...")
         self.floating_refresh_button = FloatingRefreshButton(self.root, self.on_refresh_full, self.logger)
+        EInkControlGUI._bind_activation_reconcile(self, self.floating_refresh_button.window)
 
     def _destroy_floating_refresh_button(self):
         if not self.floating_refresh_button:
@@ -930,7 +958,12 @@ class EInkControlGUI:
         if remap_target is None or not _apply_input_mode(self.logger, remap_target):
             self.log_message("⚠ Rotation succeeded but input remap failed", level='warning')
         else:
-            ensure_touch_available(self.logger, remap_target)
+            reconcile_touch(
+                self.logger,
+                self.display_mgr,
+                target=remap_target,
+                reason="orientation_toggled",
+            )
 
         save_orientation_preference(self.logger, confirmed_rotation)
         self.update_status(f"Orientation set to {label}")
@@ -1075,7 +1108,12 @@ class EInkControlGUI:
                             self._live_sync_state["last_eink_orientation"] = confirmed_rotation
 
                         if _apply_input_mode(self.logger, "eink"):
-                            ensure_touch_available(self.logger, "eink")
+                            reconcile_touch(
+                                self.logger,
+                                self.display_mgr,
+                                target="eink",
+                                reason="lid_state_reconcile",
+                            )
                         else:
                             self.log_message("⚠ Lid-driven rotation succeeded but input remap failed", level='warning')
 
