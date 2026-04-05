@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import HelperDaemon
 import Tinta4Plus
 
 
@@ -26,6 +27,18 @@ class LoggingTargetsTests(unittest.TestCase):
 
         file_handler_cls.assert_called_once_with("/tmp/TintaHelper.log", mode="a")
         self.assertEqual(logger.name, "toggle-eink")
+
+    def test_helper_main_uses_append_mode_for_helper_log_file(self):
+        with patch.object(HelperDaemon.os, "geteuid", return_value=0), \
+             patch.object(HelperDaemon.logging, "FileHandler") as file_handler_cls, \
+             patch.object(HelperDaemon.logging, "getLogger") as get_logger, \
+             patch.object(HelperDaemon, "HelperDaemon") as daemon_cls:
+            get_logger.return_value = unittest.mock.MagicMock()
+            daemon_cls.return_value.run.return_value = 0
+            rc = HelperDaemon.main()
+
+        self.assertEqual(rc, 0)
+        file_handler_cls.assert_called_once_with("/tmp/TintaHelper.log", mode="a")
 
 
 if __name__ == "__main__":
