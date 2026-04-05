@@ -63,9 +63,138 @@ eDP-1 connected primary 1800x2880+0+0 right (normal left inverted right x axis y
         )
         self.assertIsNone(self.manager._xrandr_cache)
 
-    def test_enable_display_lower_scale_resets_to_one_then_applies_target_scale(self):
-        with patch.object(self.manager, "get_effective_display_scale", return_value=1.9, create=True), \
-             patch.object(self.manager, "is_display_active", return_value=True), \
+
+class DisplayManagerTargetStateTests(unittest.TestCase):
+    def setUp(self):
+        self.logger = MagicMock()
+        self.manager = DisplayManager(self.logger)
+
+    def test_build_target_state_native_oled(self):
+        target = self.manager._build_display_target_state("eDP-1", 1.0)
+
+        self.assertEqual(target["display_name"], "eDP-1")
+        self.assertEqual(target["native_width"], 2880)
+        self.assertEqual(target["native_height"], 1800)
+        self.assertEqual(target["xrandr_scale_x"], 1.0)
+        self.assertEqual(target["xrandr_scale_y"], 1.0)
+        self.assertEqual(target["logical_width"], 2880)
+        self.assertEqual(target["logical_height"], 1800)
+        self.assertEqual(target["panning_width"], 2880)
+        self.assertEqual(target["panning_height"], 1800)
+        self.assertEqual(target["framebuffer_width"], 2880)
+        self.assertEqual(target["framebuffer_height"], 1800)
+
+    def test_build_target_state_scaled_oled(self):
+        target = self.manager._build_display_target_state("eDP-1", 1.5)
+
+        self.assertAlmostEqual(target["xrandr_scale_x"], 1 / 1.5)
+        self.assertAlmostEqual(target["xrandr_scale_y"], 1 / 1.5)
+        self.assertEqual(target["logical_width"], 1920)
+        self.assertEqual(target["logical_height"], 1200)
+        self.assertEqual(target["panning_width"], 1920)
+        self.assertEqual(target["panning_height"], 1200)
+        self.assertEqual(target["framebuffer_width"], 1920)
+        self.assertEqual(target["framebuffer_height"], 1200)
+
+    def test_build_target_state_scaled_eink(self):
+        target = self.manager._build_display_target_state("eDP-2", 1.75)
+
+        self.assertAlmostEqual(target["xrandr_scale_x"], 1 / 1.75)
+        self.assertAlmostEqual(target["xrandr_scale_y"], 1 / 1.75)
+        self.assertEqual(target["logical_width"], 1462)
+        self.assertEqual(target["logical_height"], 914)
+        self.assertEqual(target["panning_width"], 1462)
+        self.assertEqual(target["panning_height"], 914)
+        self.assertEqual(target["framebuffer_width"], 1462)
+        self.assertEqual(target["framebuffer_height"], 914)
+
+    def test_apply_display_scale_builds_full_state_xrandr_command(self):
+        with patch("DisplayManager.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            ok = self.manager._apply_display_scale("eDP-1", scale=1.5)
+
+        self.assertTrue(ok)
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[0:3], ["xrandr", "--output", "eDP-1"])
+        self.assertIn("--mode", command)
+        self.assertIn("2880x1800", command)
+        self.assertIn("--scale", command)
+        self.assertIn("0.6666666666666666x0.6666666666666666", command)
+        self.assertIn("--panning", command)
+        self.assertIn("1920x1200", command)
+        self.assertIn("--fb", command)
+        self.assertIn("1920x1200", command)
+
+    def test_apply_display_scale_unknown_display_uses_auto(self):
+        with patch("DisplayManager.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            ok = self.manager._apply_display_scale("HDMI-9", scale=1.5)
+
+        self.assertTrue(ok)
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[0:3], ["xrandr", "--output", "HDMI-9"])
+        self.assertIn("--auto", command)
+
+
+class DisplayManagerVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.logger = MagicMock()
+        self.manager = DisplayManager(self.logger)
+
+    def _target_state(self):
+        return {
+            "display_name": "eDP-2",
+            "logical_width": 1600,
+            "logical_height": 1000,
+            "framebuffer_width": 1600,
+            "framebuffer_height": 1000,
+        }
+
+    def test_verify_display_target_state_success(self):
+        xrandr_output = """
+Screen 0: minimum 8 x 8, current 1600 x 1000, maximum 32767 x 32767
+eDP-2 connected primary 1600x1000+0+0 normal (normal left inverted right x axis y axis)
+""".strip()
+
+        ok = self.manager._verify_display_target_state(
+            "eDP-2", self._target_state(), xrandr_output=xrandr_output
+        )
+
+        self.assertTrue(ok)
+
+    def test_verify_display_target_state_fails_when_framebuffer_too_small(self):
+        xrandr_output = """
+Screen 0: minimum 8 x 8, current 1500 x 900, maximum 32767 x 32767
+eDP-2 connected primary 1600x1000+0+0 normal (normal left inverted right x axis y axis)
+""".strip()
+
+        ok = self.manager._verify_display_target_state(
+            "eDP-2", self._target_state(), xrandr_output=xrandr_output
+        )
+
+        self.assertFalse(ok)
+
+    def test_verify_display_target_state_fails_when_output_geometry_wrong(self):
+        xrandr_output = """
+Screen 0: minimum 8 x 8, current 1600 x 1000, maximum 32767 x 32767
+eDP-2 connected primary 1400x900+0+0 normal (normal left inverted right x axis y axis)
+""".strip()
+
+        ok = self.manager._verify_display_target_state(
+            "eDP-2", self._target_state(), xrandr_output=xrandr_output
+        )
+
+        self.assertFalse(ok)
+
+
+class DisplayManagerRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.logger = MagicMock()
+        self.manager = DisplayManager(self.logger)
+
+    def test_enable_display_failed_verify_triggers_single_recovery_then_succeeds(self):
+        with patch.object(self.manager, "_verify_display_target_state", side_effect=[False, True]) as verify_mock, \
+             patch.object(self.manager, "_get_xrandr_output", return_value=None), \
              patch("DisplayManager.time.sleep"), \
              patch("DisplayManager.subprocess.run") as run_mock:
             run_mock.return_value.returncode = 0
@@ -73,56 +202,21 @@ eDP-1 connected primary 1800x2880+0+0 right (normal left inverted right x axis y
             ok = self.manager.enable_display("eDP-1", scale=1.5)
 
         self.assertTrue(ok)
-        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(verify_mock.call_count, 2)
+        self.assertEqual(run_mock.call_count, 3)
 
-        first_cmd = run_mock.call_args_list[0].args[0]
-        second_cmd = run_mock.call_args_list[1].args[0]
-
-        self.assertEqual(first_cmd[0:3], ["xrandr", "--output", "eDP-1"])
-        self.assertIn("--scale", first_cmd)
-        self.assertIn("1x1", first_cmd)
-
-        self.assertEqual(second_cmd[0:3], ["xrandr", "--output", "eDP-1"])
-        self.assertIn("--scale", second_cmd)
-        self.assertNotIn("1x1", second_cmd)
-
-    def test_enable_display_higher_scale_applies_once(self):
-        with patch.object(self.manager, "get_effective_display_scale", return_value=1.5, create=True), \
-             patch.object(self.manager, "is_display_active", return_value=True), \
-             patch("DisplayManager.time.sleep"), \
-             patch("DisplayManager.subprocess.run") as run_mock:
-            run_mock.return_value.returncode = 0
-
-            ok = self.manager.enable_display("eDP-1", scale=1.9)
-
-        self.assertTrue(ok)
-        self.assertEqual(run_mock.call_count, 1)
-
-    def test_enable_display_unknown_current_scale_applies_once(self):
-        with patch.object(self.manager, "get_effective_display_scale", return_value=None, create=True), \
-             patch.object(self.manager, "is_display_active", return_value=True), \
+    def test_enable_display_returns_false_when_recovery_verification_still_fails(self):
+        with patch.object(self.manager, "_verify_display_target_state", side_effect=[False, False]) as verify_mock, \
+             patch.object(self.manager, "_get_xrandr_output", return_value=None), \
              patch("DisplayManager.time.sleep"), \
              patch("DisplayManager.subprocess.run") as run_mock:
             run_mock.return_value.returncode = 0
 
             ok = self.manager.enable_display("eDP-1", scale=1.5)
 
-        self.assertTrue(ok)
-        self.assertEqual(run_mock.call_count, 1)
-
-    def test_enable_display_tolerates_nonzero_xrandr_when_output_becomes_active(self):
-        with patch.object(self.manager, "get_effective_display_scale", return_value=None, create=True), \
-             patch.object(self.manager, "is_display_active", return_value=True), \
-             patch("DisplayManager.time.sleep"), \
-             patch("DisplayManager.subprocess.run") as run_mock:
-            run_mock.return_value.returncode = 1
-            run_mock.return_value.stderr = b"X Error of failed request:  BadMatch"
-
-            ok = self.manager.enable_display("eDP-2", scale=1.75)
-
-        self.assertTrue(ok)
-        self.assertEqual(run_mock.call_count, 1)
-        self.logger.warning.assert_called()
+        self.assertFalse(ok)
+        self.assertEqual(verify_mock.call_count, 2)
+        self.assertEqual(run_mock.call_count, 3)
 
 
 if __name__ == "__main__":

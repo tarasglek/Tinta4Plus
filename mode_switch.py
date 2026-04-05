@@ -101,6 +101,35 @@ def _run_xinput(logger, args):
         return None
 
 
+def _log_post_switch_display_snapshot(logger, reason):
+    """Log concise xrandr state after a display mode switch."""
+    try:
+        query = subprocess.run(["xrandr", "--query"], check=True, capture_output=True, text=True)
+        lines = (query.stdout or "").splitlines()
+
+        screen_line = next((line.strip() for line in lines if line.startswith("Screen ")), "<missing>")
+        active_outputs = []
+        for line in lines:
+            if " connected" not in line:
+                continue
+            if re.search(r"\b\d+x\d+\+\d+\+\d+\b", line):
+                active_outputs.append(line.strip())
+
+        outputs_summary = " | ".join(active_outputs) if active_outputs else "<none>"
+        logger.info(f"Display snapshot ({reason}): {screen_line}")
+        logger.info(f"Display snapshot ({reason}) active outputs: {outputs_summary}")
+    except Exception as e:
+        logger.warning(f"Display snapshot ({reason}) xrandr --query failed: {e}")
+        return
+
+    try:
+        monitors = subprocess.run(["xrandr", "--listactivemonitors"], check=True, capture_output=True, text=True)
+        monitor_lines = [line.strip() for line in (monitors.stdout or "").splitlines() if line.strip()]
+        logger.info(f"Display snapshot ({reason}) monitors: {' || '.join(monitor_lines)}")
+    except Exception as e:
+        logger.warning(f"Display snapshot ({reason}) xrandr --listactivemonitors failed: {e}")
+
+
 def _list_xinput_devices(logger):
     output = _run_xinput(logger, ["--list", "--short"])
     if output is None:
@@ -486,6 +515,7 @@ def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     apply_stored_orientation(display_mgr, logger, target="eink")
     reconcile_touch(logger, display_mgr, target="eink", reason="switch_to_eink")
+    _log_post_switch_display_snapshot(logger, "switch_to_eink")
 
     logger.info("Now using E-Ink")
     return True
@@ -548,6 +578,7 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     apply_stored_orientation(display_mgr, logger, target="oled")
     reconcile_touch(logger, display_mgr, target="oled", reason="switch_to_oled")
+    _log_post_switch_display_snapshot(logger, "switch_to_oled")
 
     logger.info("Now using OLED")
     return True

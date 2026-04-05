@@ -202,40 +202,42 @@ class DisplayManager:
 
         return None
 
-    def _apply_display_scale(self, display_name, scale=None):
-        """Apply one xrandr scale configuration to the provided display."""
+    def _build_display_target_state(self, display_name, scale=None):
+        """Build one explicit target state for display apply/verify operations."""
         native_resolution = self.DISPLAY_RESOLUTIONS.get(display_name)
-        cmd = ['xrandr', '--output', display_name]
+        if not native_resolution:
+            return None
 
-        if native_resolution:
-            native_width, native_height = native_resolution
-            cmd.extend(['--mode', f'{native_width}x{native_height}'])
+        requested_scale = 1.0 if scale is None else float(scale)
+        if requested_scale <= 0:
+            self.logger.error(f"Invalid scale {scale} for {display_name}")
+            return None
 
-            if scale is None or scale == 1.0:
-                cmd.extend(['--panning', f'{native_width}x{native_height}'])
-                cmd.extend(['--scale', '1x1'])
-            else:
-                if scale <= 0:
-                    self.logger.error(f"Invalid scale {scale} for {display_name}")
-                    return False
+        native_width, native_height = native_resolution
+        xrandr_scale_x = 1.0 / requested_scale
+        xrandr_scale_y = 1.0 / requested_scale
 
-                # Our convention: scale=1.6 means "UI appears 1.6x larger" (lower effective DPI)
-                # xrandr convention: --scale 1.6 means "zoom out" (UI appears smaller)
-                # These are OPPOSITE, so we invert for xrandr.
-                scale_inv = 1.0 / scale
-                panning_width = int(native_width * scale_inv)
-                panning_height = int(native_height * scale_inv)
+        logical_width = max(1, int(native_width * xrandr_scale_x))
+        logical_height = max(1, int(native_height * xrandr_scale_y))
 
-                cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
-                cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
-                self.logger.info(
-                    f"Scaling: virtual desktop {panning_width}x{panning_height}, "
-                    f"xrandr scale {scale_inv:.3f}x{scale_inv:.3f} (our scale={scale}), "
-                    f"physical {native_width}x{native_height}"
-                )
-        else:
-            self.logger.warning(f"Unknown display {display_name}, using auto mode")
-            cmd.append('--auto')
+        return {
+            'display_name': display_name,
+            'native_width': native_width,
+            'native_height': native_height,
+            'requested_scale': requested_scale,
+            'xrandr_scale_x': xrandr_scale_x,
+            'xrandr_scale_y': xrandr_scale_y,
+            'logical_width': logical_width,
+            'logical_height': logical_height,
+            'panning_width': logical_width,
+            'panning_height': logical_height,
+            'framebuffer_width': logical_width,
+            'framebuffer_height': logical_height,
+        }
+
+    def _run_xrandr_apply_command(self, display_name, cmd):
+        cmd_text = " ".join(cmd)
+        self.logger.info(f"Running xrandr apply for {display_name}: {cmd_text}")
 
         try:
             result = subprocess.run(
@@ -245,9 +247,11 @@ class DisplayManager:
             )
             if result.returncode != 0:
                 self.logger.warning(
-                    f"xrandr returned {result.returncode}: {result.stderr}; "
+                    f"xrandr apply returned {result.returncode} for {display_name}: {result.stderr}; "
                     "continuing and verifying display state"
                 )
+            else:
+                self.logger.info(f"xrandr apply succeeded for {display_name}")
         except subprocess.TimeoutExpired:
             self.logger.error(f"xrandr enable command timed out after {self.XRANDR_TIMEOUT}s")
             return False
@@ -258,44 +262,191 @@ class DisplayManager:
         self._xrandr_cache = None
         return True
 
+    def _apply_display_target_state(self, target_state):
+        """Apply xrandr using one coherent target state (mode, scale, panning, fb)."""
+        display_name = target_state['display_name']
+        scale_x = target_state['xrandr_scale_x']
+        scale_y = target_state['xrandr_scale_y']
+
+        scale_text = '1x1' if scale_x == 1.0 and scale_y == 1.0 else f'{scale_x}x{scale_y}'
+
+        cmd = [
+            'xrandr', '--output', display_name,
+            '--mode', f"{target_state['native_width']}x{target_state['native_height']}",
+            '--scale', scale_text,
+            '--panning', f"{target_state['panning_width']}x{target_state['panning_height']}",
+            '--fb', f"{target_state['framebuffer_width']}x{target_state['framebuffer_height']}",
+        ]
+
+        return self._run_xrandr_apply_command(display_name, cmd)
+
+    def _extract_actual_randr_state(self, display_name, xrandr_output=None):
+        """Extract framebuffer and output geometry from xrandr output."""
+        output = xrandr_output if xrandr_output is not None else self._get_xrandr_output()
+        if not output:
+            return None
+
+        framebuffer_width = None
+        framebuffer_height = None
+        output_active = False
+        output_width = None
+        output_height = None
+
+        for line in output.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('Screen '):
+                match = re.search(r"current\s+(\d+)\s+x\s+(\d+)", stripped)
+                if match:
+                    framebuffer_width = int(match.group(1))
+                    framebuffer_height = int(match.group(2))
+                continue
+
+            if not re.search(rf"^{re.escape(display_name)}\s+connected\b", stripped):
+                continue
+
+            geo_match = re.search(r"\b(\d+)x(\d+)\+\d+\+\d+\b", stripped)
+            if geo_match:
+                output_active = True
+                output_width = int(geo_match.group(1))
+                output_height = int(geo_match.group(2))
+
+        return {
+            'framebuffer_width': framebuffer_width,
+            'framebuffer_height': framebuffer_height,
+            'output_active': output_active,
+            'output_width': output_width,
+            'output_height': output_height,
+        }
+
+    def _verify_display_target_state(self, display_name, target_state, xrandr_output=None):
+        """Verify post-apply RandR state matches the expected target state."""
+        actual = self._extract_actual_randr_state(display_name, xrandr_output=xrandr_output)
+        if not actual:
+            self.logger.warning(f"Could not read post-apply xrandr state for {display_name}")
+            return False
+
+        expected_width = target_state['logical_width']
+        expected_height = target_state['logical_height']
+
+        mismatches = {}
+
+        if not actual['output_active']:
+            mismatches['output_active'] = {'expected': True, 'actual': False}
+
+        fb_width = actual['framebuffer_width']
+        fb_height = actual['framebuffer_height']
+        if fb_width is None or fb_height is None:
+            mismatches['framebuffer'] = {'expected': 'present', 'actual': None}
+        else:
+            if fb_width < expected_width or fb_height < expected_height:
+                mismatches['framebuffer_too_small'] = {
+                    'expected_min': f"{expected_width}x{expected_height}",
+                    'actual': f"{fb_width}x{fb_height}",
+                }
+
+        if actual['output_width'] != expected_width or actual['output_height'] != expected_height:
+            mismatches['output_geometry'] = {
+                'expected': f"{expected_width}x{expected_height}",
+                'actual': (
+                    f"{actual['output_width']}x{actual['output_height']}"
+                    if actual['output_width'] is not None and actual['output_height'] is not None
+                    else None
+                ),
+            }
+
+        if mismatches:
+            self.logger.warning(f"Display state mismatch for {display_name}: {mismatches}")
+            return False
+
+        self.logger.info(
+            f"Verified display state for {display_name}: "
+            f"logical={expected_width}x{expected_height}, "
+            f"framebuffer={fb_width}x{fb_height}"
+        )
+        return True
+
+    def _reset_display_to_native_baseline(self, display_name):
+        """Reset display to known-good native baseline before one retry."""
+        baseline = self._build_display_target_state(display_name, 1.0)
+        if not baseline:
+            return self._apply_display_scale(display_name, 1.0)
+
+        self.logger.info(f"Resetting {display_name} to native baseline before retry")
+        return self._apply_display_target_state(baseline)
+
+    def _apply_display_scale(self, display_name, scale=None):
+        """Apply one full xrandr target state to the provided display."""
+        target_state = self._build_display_target_state(display_name, scale)
+        if target_state:
+            self.logger.info(f"Target state for {display_name}: {target_state}")
+            return self._apply_display_target_state(target_state)
+
+        self.logger.warning(f"Unknown display {display_name}, using auto mode")
+        cmd = ['xrandr', '--output', display_name, '--auto']
+        return self._run_xrandr_apply_command(display_name, cmd)
+
     def enable_display(self, display_name, scale=None):
-        """Enable/turn on a display with optional scaling
+        """Enable/turn on a display with optional scaling.
 
         Args:
             display_name: Name of the display (e.g., 'eDP-1', 'eDP-2')
             scale: Optional scale factor (e.g., 1.60 means UI appears 1.6x larger, lower DPI)
-                   Uses xrandr --scale with --panning to maintain full panel coverage.
-                   This keeps touch input properly mapped.
+                   Uses xrandr --scale with --panning and --fb for full-state transitions.
         """
         try:
-            should_reset_to_native = False
-
-            if scale is not None and scale != 1.0:
-                current_scale = self.get_effective_display_scale(display_name)
-                if current_scale is not None and scale < current_scale:
-                    should_reset_to_native = True
-                    self.logger.info(
-                        f"Lowering scale on {display_name}: reset to 1.0 before applying {scale} "
-                        f"(current≈{current_scale:.3f})"
-                    )
-
-            if should_reset_to_native and not self._apply_display_scale(display_name, 1.0):
-                return False
+            target_state = self._build_display_target_state(display_name, scale)
 
             if not self._apply_display_scale(display_name, scale):
                 return False
 
-            # Preserve existing verification behavior after enable.
             self._xrandr_cache = None
             time.sleep(self.XRANDR_APPLY_DELAY)
 
-            if self.is_display_active(display_name):
-                scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
-                self.logger.info(f"Enabled display: {display_name}{scale_info}")
-                return True
+            verified = True
+            if target_state:
+                verified = self._verify_display_target_state(display_name, target_state)
+                if not verified:
+                    self.logger.warning(
+                        f"Post-apply verification failed for {display_name}; running one recovery attempt"
+                    )
+                    if not self._reset_display_to_native_baseline(display_name):
+                        return False
+                    if not self._apply_display_target_state(target_state):
+                        return False
 
-            self.logger.error(f"Failed to enable display: {display_name} (display not active after command)")
-            return False
+                    self._xrandr_cache = None
+                    time.sleep(self.XRANDR_APPLY_DELAY)
+                    verified = self._verify_display_target_state(display_name, target_state)
+            else:
+                verified = self.is_display_active(display_name)
+
+            if not verified:
+                self.logger.error(
+                    f"Failed to enable display: {display_name} "
+                    "(verification mismatch after one recovery attempt)"
+                )
+                return False
+
+            scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
+            self.logger.info(f"Enabled display: {display_name}{scale_info}")
+
+            xrandr_output = self._get_xrandr_output()
+            if xrandr_output:
+                lines = xrandr_output.split('\n')
+                screen_line = next((line.strip() for line in lines if line.startswith('Screen ')), None)
+                active_line = next(
+                    (
+                        line.strip()
+                        for line in lines
+                        if re.search(rf"^{re.escape(display_name)}\\s+connected\\b", line)
+                    ),
+                    None,
+                )
+                if screen_line:
+                    self.logger.info(f"Post-enable xrandr screen: {screen_line}")
+                if active_line:
+                    self.logger.info(f"Post-enable xrandr output: {active_line}")
+            return True
 
         except Exception as e:
             self.logger.error(f"Failed to enable display: {e}")

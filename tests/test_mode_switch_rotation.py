@@ -71,6 +71,8 @@ class SwitchFlowOrientationTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
+        self.display_mgr.enable_display.assert_called_once_with(mode_switch.DISPLAY_EINK, scale=1.75)
+        self.display_mgr.disable_display.assert_called_once_with(mode_switch.DISPLAY_OLED)
         self.display_mgr.set_display_rotation.assert_called_once_with(mode_switch.DISPLAY_EINK, "left")
         apply_input_mode.assert_has_calls([
             call(self.logger, "eink"),
@@ -97,6 +99,8 @@ class SwitchFlowOrientationTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
+        self.display_mgr.enable_display.assert_called_once_with(mode_switch.DISPLAY_OLED, scale=1.75)
+        self.display_mgr.disable_display.assert_called_once_with(mode_switch.DISPLAY_EINK)
         self.display_mgr.set_display_rotation.assert_called_once_with(mode_switch.DISPLAY_OLED, "normal")
         apply_input_mode.assert_called_once_with(self.logger, "oled")
 
@@ -107,6 +111,7 @@ class SwitchFlowOrientationTests(unittest.TestCase):
              patch.object(mode_switch, "_apply_input_mode", return_value=True), \
              patch.object(mode_switch, "apply_stored_orientation", return_value=False), \
              patch.object(mode_switch, "reconcile_touch", return_value=True) as reconcile_touch, \
+             patch.object(mode_switch, "_log_post_switch_display_snapshot") as log_snapshot, \
              patch.object(mode_switch.time, "sleep", return_value=None):
             ok = mode_switch.switch_to_eink(
                 self.display_mgr,
@@ -123,6 +128,7 @@ class SwitchFlowOrientationTests(unittest.TestCase):
             target="eink",
             reason="switch_to_eink",
         )
+        log_snapshot.assert_called_once_with(self.logger, "switch_to_eink")
 
     def test_switch_to_oled_runs_touch_recovery_after_switch(self):
         with patch.object(mode_switch, "_restore_dpms_after_eink"), \
@@ -132,6 +138,7 @@ class SwitchFlowOrientationTests(unittest.TestCase):
              patch.object(mode_switch, "_apply_input_mode", return_value=True), \
              patch.object(mode_switch, "apply_stored_orientation", return_value=False), \
              patch.object(mode_switch, "reconcile_touch", return_value=False) as reconcile_touch, \
+             patch.object(mode_switch, "_log_post_switch_display_snapshot") as log_snapshot, \
              patch.object(mode_switch.time, "sleep", return_value=None):
             ok = mode_switch.switch_to_oled(
                 self.display_mgr,
@@ -147,6 +154,7 @@ class SwitchFlowOrientationTests(unittest.TestCase):
             target="oled",
             reason="switch_to_oled",
         )
+        log_snapshot.assert_called_once_with(self.logger, "switch_to_oled")
 
 
 if __name__ == "__main__":
