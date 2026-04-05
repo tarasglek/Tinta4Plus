@@ -215,19 +215,28 @@ class DisplayManager:
             return None
 
         native_width, native_height = native_resolution
-        xrandr_scale_x = 1.0 / requested_scale
-        xrandr_scale_y = 1.0 / requested_scale
+        transform_scale_x = 1.0 / requested_scale
+        transform_scale_y = 1.0 / requested_scale
 
-        logical_width = max(1, math.ceil(native_width * xrandr_scale_x))
-        logical_height = max(1, math.ceil(native_height * xrandr_scale_y))
+        logical_width = max(1, math.ceil(native_width * transform_scale_x))
+        logical_height = max(1, math.ceil(native_height * transform_scale_y))
+        if transform_scale_x == 1.0 and transform_scale_y == 1.0:
+            transform_matrix = '1,0,0,0,1,0,0,0,1'
+        else:
+            transform_matrix = (
+                f'{transform_scale_x},0,0,'
+                f'0,{transform_scale_y},0,'
+                '0,0,1'
+            )
 
         return {
             'display_name': display_name,
             'native_width': native_width,
             'native_height': native_height,
             'requested_scale': requested_scale,
-            'xrandr_scale_x': xrandr_scale_x,
-            'xrandr_scale_y': xrandr_scale_y,
+            'transform_scale_x': transform_scale_x,
+            'transform_scale_y': transform_scale_y,
+            'transform_matrix': transform_matrix,
             'logical_width': logical_width,
             'logical_height': logical_height,
             'panning_width': logical_width,
@@ -264,17 +273,13 @@ class DisplayManager:
         return True
 
     def _apply_display_target_state(self, target_state):
-        """Apply xrandr using one coherent target state (mode, scale, panning, fb)."""
+        """Apply xrandr using one coherent target state (mode, transform, panning, fb)."""
         display_name = target_state['display_name']
-        scale_x = target_state['xrandr_scale_x']
-        scale_y = target_state['xrandr_scale_y']
-
-        scale_text = '1x1' if scale_x == 1.0 and scale_y == 1.0 else f'{scale_x}x{scale_y}'
 
         cmd = [
             'xrandr', '--output', display_name,
             '--mode', f"{target_state['native_width']}x{target_state['native_height']}",
-            '--scale', scale_text,
+            '--transform', target_state['transform_matrix'],
             '--panning', f"{target_state['panning_width']}x{target_state['panning_height']}",
             '--fb', f"{target_state['framebuffer_width']}x{target_state['framebuffer_height']}",
         ]
@@ -365,15 +370,6 @@ class DisplayManager:
         )
         return True
 
-    def _reset_display_to_native_baseline(self, display_name):
-        """Reset display to known-good native baseline before one retry."""
-        baseline = self._build_display_target_state(display_name, 1.0)
-        if not baseline:
-            return self._apply_display_scale(display_name, 1.0)
-
-        self.logger.info(f"Resetting {display_name} to native baseline before retry")
-        return self._apply_display_target_state(baseline)
-
     def _apply_display_scale(self, display_name, scale=None):
         """Apply one full xrandr target state to the provided display."""
         target_state = self._build_display_target_state(display_name, scale)
@@ -392,14 +388,10 @@ class DisplayManager:
             self.logger.warning(f"Unknown display {display_name}, using auto mode")
             return self._run_xrandr_apply_command(display_name, ['xrandr', '--output', display_name, '--auto'])
 
-        scale_x = target_state['xrandr_scale_x']
-        scale_y = target_state['xrandr_scale_y']
-        scale_text = '1x1' if scale_x == 1.0 and scale_y == 1.0 else f'{scale_x}x{scale_y}'
-
         cmd = [
             'xrandr', '--output', display_name,
             '--mode', f"{target_state['native_width']}x{target_state['native_height']}",
-            '--scale', scale_text,
+            '--transform', target_state['transform_matrix'],
         ]
         return self._run_xrandr_apply_command(display_name, cmd)
 
