@@ -408,6 +408,24 @@ class FrontlightRecoveryTests(unittest.TestCase):
         self.assertTrue(gui.secure_boot_warning.grid_called)
         gui.sync_frontlight_state.assert_not_called()
 
+    def test_check_ec_status_handles_keyboard_interrupt_by_closing(self):
+        gui = self.make_gui({"secure_boot_enabled": False, "available": True})
+        gui.helper.send_command.side_effect = KeyboardInterrupt()
+        gui.on_closing = MagicMock()
+
+        Tinta4Plus.EInkControlGUI.check_ec_status(gui)
+
+        gui.on_closing.assert_called_once()
+
+    def test_sync_frontlight_state_handles_keyboard_interrupt_by_closing(self):
+        gui = self.make_gui({"secure_boot_enabled": False, "available": True})
+        gui.helper.send_command.side_effect = KeyboardInterrupt()
+        gui.on_closing = MagicMock()
+
+        Tinta4Plus.EInkControlGUI.sync_frontlight_state(gui)
+
+        gui.on_closing.assert_called_once()
+
 
 class LiveStateReconcilerTests(unittest.TestCase):
     def make_gui(self):

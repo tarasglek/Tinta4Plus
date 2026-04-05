@@ -797,6 +797,9 @@ class EInkControlGUI:
                     # Sync GUI with actual EC state
                     self.sync_frontlight_state()
 
+        except KeyboardInterrupt:
+            self.logger.info("Interrupted during EC status check; closing application")
+            self.on_closing()
         except Exception as e:
             self.logger.error(f"Failed to check EC status: {e}")
             self.log_message(f"Warning: Could not verify EC status: {e}", level='error')
@@ -814,6 +817,9 @@ class EInkControlGUI:
                     self.brightness_label.config(text=str(brightness))
                     self.log_message(f"Synced brightness level: {brightness}")
 
+        except KeyboardInterrupt:
+            self.logger.info("Interrupted during frontlight sync; closing application")
+            self.on_closing()
         except Exception as e:
             self.logger.warning(f"Failed to sync frontlight state: {e}")
             self.log_message(f"Warning: Could not sync frontlight state from EC", level='error')
