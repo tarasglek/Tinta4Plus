@@ -44,6 +44,8 @@ from mode_switch import (
     switch_to_oled,
 )
 
+LOG_FILE = '/tmp/TintaHelper.log'
+
 class FloatingRefreshButton:
     """Floating refresh button window that stays on top"""
 
@@ -1572,22 +1574,26 @@ def show_disclaimer_dialog(parent=None):
         return False
 
 
+def setup_logger():
+    logger = logging.getLogger('tinta4plus-gui')
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+    file_handler = logging.FileHandler(LOG_FILE, mode='a')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+    logger.handlers = [stream_handler, file_handler]
+    return logger
+
+
 def main():
     """Entry point"""
     HELPER_SCRIPT = '/usr/local/lib/tinta4plus/HelperDaemon.py'
 
-    # Setup logging
-    log_handlers = [
-        logging.StreamHandler(),  # Console output
-        logging.FileHandler('/tmp/tinta4plus.log', mode='w')  # File output (overwrite mode)
-    ]
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=log_handlers
-    )
-    logger = logging.getLogger('tinta4plus-gui')
+    logger = setup_logger()
 
     # Setup exception hook to log uncaught exceptions
     def handle_exception(exc_type, exc_value, exc_traceback):

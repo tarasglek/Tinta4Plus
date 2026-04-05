@@ -14,14 +14,21 @@ SOCKET_PATH = "/run/tinta4plus.sock"
 DEFAULT_SCALE = 1.75
 CONFIG_DIR = os.path.expanduser("~/.config/Tinta4Plus")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings")
+LOG_FILE = "/tmp/TintaHelper.log"
 
 
 def setup_logger():
     logger = logging.getLogger("toggle-eink")
     logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.handlers = [handler]
+    logger.propagate = False
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    file_handler = logging.FileHandler(LOG_FILE, mode='a')
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+
+    logger.handlers = [stream_handler, file_handler]
     return logger
 
 
