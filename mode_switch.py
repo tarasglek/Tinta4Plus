@@ -571,6 +571,9 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     time.sleep(1.0)
 
+    if autoswitch_theme:
+        set_xfce_theme(logger, THEME_ADWAITA_DARK)
+
     disable_ok = display_mgr.disable_display(DISPLAY_EINK)
     if not disable_ok:
         logger.warning("Failed to disable E-Ink output; continuing with final reconcile")
@@ -581,9 +584,6 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     if not disable_ok:
         logger.warning("OLED switch converged after E-Ink disable failure")
-
-    if autoswitch_theme:
-        set_xfce_theme(logger, THEME_ADWAITA_DARK)
 
     _restore_dpms_after_eink(logger)
 

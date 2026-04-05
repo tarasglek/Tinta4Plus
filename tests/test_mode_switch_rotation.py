@@ -235,6 +235,24 @@ class SwitchFlowOrientationTests(unittest.TestCase):
         self.display_mgr.disable_display.assert_called_once_with(mode_switch.DISPLAY_EINK)
         self.display_mgr.finalize_single_display.assert_called_once_with(mode_switch.DISPLAY_OLED, scale=1.75)
 
+    def test_switch_to_oled_sets_dark_theme_before_finalize_failure(self):
+        self.display_mgr.finalize_single_display.return_value = False
+
+        with patch.object(mode_switch, "_restore_dpms_after_eink"), \
+             patch.object(mode_switch, "set_xfce_theme", return_value=True) as set_theme, \
+             patch.object(mode_switch, "helper_command", return_value=True), \
+             patch.object(mode_switch, "_resolve_privacy_image_path", return_value=None), \
+             patch.object(mode_switch.time, "sleep", return_value=None):
+            ok = mode_switch.switch_to_oled(
+                self.display_mgr,
+                self.helper,
+                self.logger,
+                autoswitch_theme=True,
+            )
+
+        self.assertFalse(ok)
+        set_theme.assert_called_once_with(self.logger, mode_switch.THEME_ADWAITA_DARK)
+
     def test_switch_to_eink_converges_when_disabling_oled_fails_but_finalize_succeeds(self):
         self.display_mgr.disable_display.return_value = False
         self.display_mgr.finalize_single_display.return_value = True
