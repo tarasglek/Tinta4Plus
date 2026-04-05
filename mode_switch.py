@@ -482,6 +482,23 @@ def _restore_dpms_after_eink(logger):
         logger.warning(f"Could not restore DPMS state: {e}")
 
 
+def _attempt_finalize_reconcile(display_mgr, logger, display_name, scale):
+    """Best-effort layout reconcile to keep active output usable after partial switch failures."""
+    try:
+        if display_mgr.finalize_single_display(display_name, scale=scale):
+            logger.warning(
+                f"Recovered {display_name} layout with best-effort finalize after transition failure"
+            )
+            return True
+        logger.warning(
+            f"Best-effort finalize failed for {display_name} after transition failure"
+        )
+        return False
+    except Exception as e:
+        logger.warning(f"Best-effort finalize raised for {display_name}: {e}")
+        return False
+
+
 def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=True, enable_frontlight=True, brightness_level=4):
     logger.info("Switching to E-Ink...")
 
@@ -508,6 +525,7 @@ def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     if not display_mgr.disable_display(DISPLAY_OLED):
         logger.error("Failed to disable OLED output")
+        _attempt_finalize_reconcile(display_mgr, logger, DISPLAY_EINK, scale)
         return False
 
     if not display_mgr.finalize_single_display(DISPLAY_EINK, scale=scale):
@@ -570,6 +588,7 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     if not display_mgr.disable_display(DISPLAY_EINK):
         logger.error("Failed to disable E-Ink output")
+        _attempt_finalize_reconcile(display_mgr, logger, DISPLAY_OLED, scale)
         return False
 
     if not display_mgr.finalize_single_display(DISPLAY_OLED, scale=scale):
