@@ -510,6 +510,10 @@ def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
         logger.error("Failed to disable OLED output")
         return False
 
+    if not display_mgr.finalize_single_display(DISPLAY_EINK, scale=scale):
+        logger.error("Failed to finalize E-Ink output layout")
+        return False
+
     if not _apply_input_mode(logger, "eink"):
         logger.warning("Failed to apply E-Ink input mode; continuing display switch")
 
@@ -566,6 +570,10 @@ def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=Tru
 
     if not display_mgr.disable_display(DISPLAY_EINK):
         logger.error("Failed to disable E-Ink output")
+        return False
+
+    if not display_mgr.finalize_single_display(DISPLAY_OLED, scale=scale):
+        logger.error("Failed to finalize OLED output layout")
         return False
 
     if autoswitch_theme:
