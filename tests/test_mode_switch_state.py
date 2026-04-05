@@ -149,6 +149,9 @@ class ToggleEinkCliStateTests(unittest.TestCase):
             def disable_display(self, _display_name):
                 return True
 
+            def finalize_single_display(self, _display_name, scale=None):
+                return True
+
             def get_active_display(self):
                 return mode_switch.DISPLAY_EINK
 
