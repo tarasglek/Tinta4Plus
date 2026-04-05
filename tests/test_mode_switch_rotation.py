@@ -210,13 +210,18 @@ class SwitchFlowOrientationTests(unittest.TestCase):
         finalize_index = calls.index(call.finalize_single_display(mode_switch.DISPLAY_OLED, scale=1.75))
         self.assertGreater(finalize_index, disable_index)
 
-    def test_switch_to_oled_attempts_finalize_reconcile_when_disabling_eink_fails(self):
+    def test_switch_to_oled_converges_when_disabling_eink_fails_but_finalize_succeeds(self):
         self.display_mgr.disable_display.return_value = False
+        self.display_mgr.finalize_single_display.return_value = True
 
         with patch.object(mode_switch, "_restore_dpms_after_eink"), \
              patch.object(mode_switch, "set_xfce_theme", return_value=True), \
              patch.object(mode_switch, "helper_command", return_value=True), \
              patch.object(mode_switch, "_resolve_privacy_image_path", return_value=None), \
+             patch.object(mode_switch, "_apply_input_mode", return_value=True), \
+             patch.object(mode_switch, "apply_stored_orientation", return_value=False), \
+             patch.object(mode_switch, "reconcile_touch", return_value=True), \
+             patch.object(mode_switch, "_log_post_switch_display_snapshot"), \
              patch.object(mode_switch.time, "sleep", return_value=None):
             ok = mode_switch.switch_to_oled(
                 self.display_mgr,
@@ -225,17 +230,22 @@ class SwitchFlowOrientationTests(unittest.TestCase):
                 autoswitch_theme=False,
             )
 
-        self.assertFalse(ok)
+        self.assertTrue(ok)
         self.display_mgr.enable_display.assert_called_once_with(mode_switch.DISPLAY_OLED, scale=1.75)
         self.display_mgr.disable_display.assert_called_once_with(mode_switch.DISPLAY_EINK)
         self.display_mgr.finalize_single_display.assert_called_once_with(mode_switch.DISPLAY_OLED, scale=1.75)
 
-    def test_switch_to_eink_attempts_finalize_reconcile_when_disabling_oled_fails(self):
+    def test_switch_to_eink_converges_when_disabling_oled_fails_but_finalize_succeeds(self):
         self.display_mgr.disable_display.return_value = False
+        self.display_mgr.finalize_single_display.return_value = True
 
         with patch.object(mode_switch, "_disable_dpms_for_eink"), \
              patch.object(mode_switch, "set_xfce_theme", return_value=True), \
              patch.object(mode_switch, "helper_command", return_value=True), \
+             patch.object(mode_switch, "_apply_input_mode", return_value=True), \
+             patch.object(mode_switch, "apply_stored_orientation", return_value=False), \
+             patch.object(mode_switch, "reconcile_touch", return_value=True), \
+             patch.object(mode_switch, "_log_post_switch_display_snapshot"), \
              patch.object(mode_switch.time, "sleep", return_value=None):
             ok = mode_switch.switch_to_eink(
                 self.display_mgr,
@@ -245,7 +255,7 @@ class SwitchFlowOrientationTests(unittest.TestCase):
                 enable_frontlight=False,
             )
 
-        self.assertFalse(ok)
+        self.assertTrue(ok)
         self.display_mgr.enable_display.assert_called_once_with(mode_switch.DISPLAY_EINK, scale=1.75)
         self.display_mgr.disable_display.assert_called_once_with(mode_switch.DISPLAY_OLED)
         self.display_mgr.finalize_single_display.assert_called_once_with(mode_switch.DISPLAY_EINK, scale=1.75)
