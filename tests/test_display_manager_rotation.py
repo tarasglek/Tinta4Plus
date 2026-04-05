@@ -198,6 +198,25 @@ eDP-2 connected primary 1600x1000+0+0 normal (normal left inverted right x axis 
 
         self.assertFalse(ok)
 
+    def test_verify_display_target_state_succeeds_when_framebuffer_exceeds_output_geometry(self):
+        xrandr_output = """
+Screen 0: minimum 8 x 8, current 1800 x 1125, maximum 32767 x 32767
+eDP-2 connected primary 1463x915+0+0 normal (normal left inverted right x axis y axis)
+""".strip()
+        target_state = {
+            "display_name": "eDP-2",
+            "logical_width": 1463,
+            "logical_height": 915,
+            "framebuffer_width": 1463,
+            "framebuffer_height": 915,
+        }
+
+        ok = self.manager._verify_display_target_state(
+            "eDP-2", target_state, xrandr_output=xrandr_output
+        )
+
+        self.assertTrue(ok)
+
     def test_verify_display_target_state_fails_when_output_geometry_wrong(self):
         xrandr_output = """
 Screen 0: minimum 8 x 8, current 1600 x 1000, maximum 32767 x 32767
@@ -234,6 +253,27 @@ class DisplayManagerRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.logger = MagicMock()
         self.manager = DisplayManager(self.logger)
+
+    def test_finalize_single_display_retries_once_after_native_baseline_reset(self):
+        with patch.object(self.manager, "_apply_display_target_state", return_value=True) as apply_target, \
+             patch.object(self.manager, "_reset_display_to_native_baseline", return_value=True) as reset_baseline, \
+             patch.object(self.manager, "_verify_display_target_state", side_effect=[False, True]), \
+             patch("DisplayManager.time.sleep"):
+            ok = self.manager.finalize_single_display("eDP-1", scale=1.75)
+
+        self.assertTrue(ok)
+        reset_baseline.assert_called_once_with("eDP-1")
+        self.assertEqual(apply_target.call_count, 2)
+
+    def test_finalize_single_display_returns_false_when_retry_still_fails(self):
+        with patch.object(self.manager, "_apply_display_target_state", return_value=True), \
+             patch.object(self.manager, "_reset_display_to_native_baseline", return_value=True) as reset_baseline, \
+             patch.object(self.manager, "_verify_display_target_state", side_effect=[False, False]), \
+             patch("DisplayManager.time.sleep"):
+            ok = self.manager.finalize_single_display("eDP-1", scale=1.75)
+
+        self.assertFalse(ok)
+        reset_baseline.assert_called_once_with("eDP-1")
 
     def test_enable_display_uses_transition_safe_activation_without_fb_resize(self):
         with patch.object(self.manager, "is_display_active", return_value=True), \

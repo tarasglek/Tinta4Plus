@@ -343,9 +343,9 @@ class DisplayManager:
         fb_height = actual['framebuffer_height']
         if fb_width is None or fb_height is None:
             mismatches['framebuffer'] = {'expected': 'present', 'actual': None}
-        elif fb_width != expected_width or fb_height != expected_height:
+        elif fb_width < expected_width or fb_height < expected_height:
             mismatches['framebuffer_size'] = {
-                'expected': f"{expected_width}x{expected_height}",
+                'expected_minimum': f"{expected_width}x{expected_height}",
                 'actual': f"{fb_width}x{fb_height}",
             }
 
@@ -369,6 +369,15 @@ class DisplayManager:
             f"framebuffer={fb_width}x{fb_height}"
         )
         return True
+
+    def _reset_display_to_native_baseline(self, display_name):
+        baseline_state = self._build_display_target_state(display_name, 1.0)
+        if not baseline_state:
+            self.logger.error(f"Cannot reset unknown display to native baseline: {display_name}")
+            return False
+
+        self.logger.info(f"Resetting {display_name} to native baseline before retry")
+        return self._apply_display_target_state(baseline_state)
 
     def _apply_display_scale(self, display_name, scale=None):
         """Apply one full xrandr target state to the provided display."""
@@ -453,8 +462,22 @@ class DisplayManager:
             time.sleep(self.XRANDR_APPLY_DELAY)
 
             if not self._verify_display_target_state(display_name, target_state):
-                self.logger.error(f"Failed to finalize single-display layout for {display_name}")
-                return False
+                if not self._reset_display_to_native_baseline(display_name):
+                    self.logger.error(f"Failed to finalize single-display layout for {display_name}")
+                    return False
+
+                self._xrandr_cache = None
+                time.sleep(self.XRANDR_APPLY_DELAY)
+
+                if not self._apply_display_target_state(target_state):
+                    return False
+
+                self._xrandr_cache = None
+                time.sleep(self.XRANDR_APPLY_DELAY)
+
+                if not self._verify_display_target_state(display_name, target_state):
+                    self.logger.error(f"Failed to finalize single-display layout for {display_name}")
+                    return False
 
             self.logger.info(
                 f"Finalized single-display layout for {display_name}: "

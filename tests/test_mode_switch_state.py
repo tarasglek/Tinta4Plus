@@ -89,6 +89,38 @@ class GetDisplayStateTests(unittest.TestCase):
         )
 
 
+class SwitchTargetMetadataTests(unittest.TestCase):
+    def test_build_switch_target_returns_expected_oled_metadata(self):
+        target = mode_switch._build_switch_target("oled")
+
+        self.assertEqual(
+            target,
+            {
+                "mode": "oled",
+                "target_output": mode_switch.DISPLAY_OLED,
+                "other_output": mode_switch.DISPLAY_EINK,
+                "theme": mode_switch.THEME_ADWAITA_DARK,
+                "input_target": "oled",
+                "snapshot_reason": "switch_to_oled",
+            },
+        )
+
+    def test_build_switch_target_returns_expected_eink_metadata(self):
+        target = mode_switch._build_switch_target("eink")
+
+        self.assertEqual(
+            target,
+            {
+                "mode": "eink",
+                "target_output": mode_switch.DISPLAY_EINK,
+                "other_output": mode_switch.DISPLAY_OLED,
+                "theme": mode_switch.THEME_HIGH_CONTRAST,
+                "input_target": "eink",
+                "snapshot_reason": "switch_to_eink",
+            },
+        )
+
+
 class ToggleEinkCliStateTests(unittest.TestCase):
     def test_cli_uses_shared_state_mode_for_toggle_direction(self):
         toggle_eink = load_toggle_eink_module()

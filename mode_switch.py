@@ -24,6 +24,28 @@ SUPPORTED_ORIENTATION_ROTATIONS = {"normal", "left"}
 ORIENTATION_PREFERENCE_KEY = "orientation_preference"
 
 
+def _build_switch_target(mode):
+    if mode == "oled":
+        return {
+            "mode": "oled",
+            "target_output": DISPLAY_OLED,
+            "other_output": DISPLAY_EINK,
+            "theme": THEME_ADWAITA_DARK,
+            "input_target": "oled",
+            "snapshot_reason": "switch_to_oled",
+        }
+    if mode == "eink":
+        return {
+            "mode": "eink",
+            "target_output": DISPLAY_EINK,
+            "other_output": DISPLAY_OLED,
+            "theme": THEME_HIGH_CONTRAST,
+            "input_target": "eink",
+            "snapshot_reason": "switch_to_eink",
+        }
+    raise ValueError(f"Unsupported switch target mode: {mode}")
+
+
 def get_display_state(display_mgr):
     oled_active = display_mgr.is_display_active(DISPLAY_OLED)
     eink_active = display_mgr.is_display_active(DISPLAY_EINK)
@@ -299,6 +321,35 @@ def _apply_input_mode(logger, target):
     return success
 
 
+def _converge_single_display(display_mgr, logger, switch_target, scale):
+    mode = switch_target["mode"]
+    target_output = switch_target["target_output"]
+    other_output = switch_target["other_output"]
+
+    if not display_mgr.enable_display(target_output, scale=scale):
+        logger.error(
+            f"Display convergence failed for mode={mode} step=enable "
+            f"target_output={target_output} other_output={other_output}"
+        )
+        return False
+
+    if not display_mgr.disable_display(other_output):
+        logger.error(
+            f"Display convergence failed for mode={mode} step=disable "
+            f"target_output={target_output} other_output={other_output}"
+        )
+        return False
+
+    if not display_mgr.finalize_single_display(target_output, scale=scale):
+        logger.error(
+            f"Display convergence failed for mode={mode} step=finalize "
+            f"target_output={target_output} other_output={other_output}"
+        )
+        return False
+
+    return True
+
+
 def _resolve_privacy_image_path(script_dir):
     image_path = EINK_DISABLED_IMAGE
     if os.path.exists(image_path):
@@ -484,115 +535,120 @@ def _restore_dpms_after_eink(logger):
 
 def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=True, enable_frontlight=True, brightness_level=4):
     logger.info("Switching to E-Ink...")
+    switch_target = _build_switch_target("eink")
+    converged = False
 
-    _disable_dpms_for_eink(logger)
+    try:
+        if not helper_command(helper, logger, "enable-eink"):
+            return False
 
-    if autoswitch_theme:
-        set_xfce_theme(logger, THEME_HIGH_CONTRAST)
+        if enable_frontlight:
+            helper_command(helper, logger, "enable-frontlight", brightness_level=brightness_level)
 
-    if not display_mgr.enable_display(DISPLAY_EINK, scale=scale):
-        logger.error("Failed to enable E-Ink display output")
+        time.sleep(0.5)
+    except Exception as e:
+        logger.error(f"E-Ink preparation failed: {e}")
         return False
 
-    time.sleep(1.0)
-
-    if not helper_command(helper, logger, "enable-eink"):
-        logger.error("Rolling back: enabling OLED display")
-        display_mgr.enable_display(DISPLAY_OLED, scale=scale)
+    try:
+        converged = _converge_single_display(display_mgr, logger, switch_target, scale)
+        if not converged:
+            return False
+    except Exception as e:
+        logger.error(f"E-Ink display convergence failed: {e}")
         return False
 
-    if enable_frontlight:
-        helper_command(helper, logger, "enable-frontlight", brightness_level=brightness_level)
+    try:
+        _disable_dpms_for_eink(logger)
 
-    time.sleep(0.5)
+        if autoswitch_theme:
+            set_xfce_theme(logger, switch_target["theme"])
 
-    disable_ok = display_mgr.disable_display(DISPLAY_OLED)
-    if not disable_ok:
-        logger.warning("Failed to disable OLED output; continuing with final reconcile")
+        if not _apply_input_mode(logger, switch_target["input_target"]):
+            logger.warning("Failed to apply E-Ink input mode; continuing display switch")
 
-    if not display_mgr.finalize_single_display(DISPLAY_EINK, scale=scale):
-        logger.error("Failed to finalize E-Ink output layout")
-        return False
+        apply_stored_orientation(display_mgr, logger, target=switch_target["input_target"])
+        reconcile_touch(
+            logger,
+            display_mgr,
+            target=switch_target["input_target"],
+            reason=switch_target["snapshot_reason"],
+        )
+        _log_post_switch_display_snapshot(logger, switch_target["snapshot_reason"])
+    except Exception as e:
+        logger.warning(f"E-Ink post-convergence follow-up failed: {e}")
 
-    if not disable_ok:
-        logger.warning("E-Ink switch converged after OLED disable failure")
-
-    if not _apply_input_mode(logger, "eink"):
-        logger.warning("Failed to apply E-Ink input mode; continuing display switch")
-
-    apply_stored_orientation(display_mgr, logger, target="eink")
-    reconcile_touch(logger, display_mgr, target="eink", reason="switch_to_eink")
-    _log_post_switch_display_snapshot(logger, "switch_to_eink")
-
-    logger.info("Now using E-Ink")
-    return True
+    if converged:
+        logger.info("Now using E-Ink")
+    return converged
 
 
 def switch_to_oled(display_mgr, helper, logger, scale=1.75, autoswitch_theme=True, script_dir="."):
     logger.info("Switching to OLED...")
-
+    switch_target = _build_switch_target("oled")
     image_process = None
-    image_path = _resolve_privacy_image_path(script_dir)
-    if image_path:
-        logger.info("Displaying privacy image on E-Ink...")
-        image_process = display_mgr.display_fullscreen_image(DISPLAY_EINK, image_path)
-        if image_process:
-            time.sleep(0.5)
-        else:
-            logger.warning("Could not display privacy image")
-    else:
-        logger.warning(f"Privacy image not found: {EINK_DISABLED_IMAGE}")
+    converged = False
 
-    if not helper_command(helper, logger, "disable-eink"):
+    try:
+        try:
+            image_path = _resolve_privacy_image_path(script_dir)
+            if image_path:
+                logger.info("Displaying privacy image on E-Ink...")
+                image_process = display_mgr.display_fullscreen_image(DISPLAY_EINK, image_path)
+                if image_process:
+                    time.sleep(0.5)
+                else:
+                    logger.warning("Could not display privacy image")
+            else:
+                logger.warning(f"Privacy image not found: {EINK_DISABLED_IMAGE}")
+
+            if not helper_command(helper, logger, "disable-eink"):
+                return False
+
+            helper_command(helper, logger, "disable-frontlight")
+            time.sleep(2.0)
+        except Exception as e:
+            logger.error(f"OLED preparation failed: {e}")
+            return False
+
+        try:
+            converged = _converge_single_display(display_mgr, logger, switch_target, scale)
+            if not converged:
+                return False
+        except Exception as e:
+            logger.error(f"OLED display convergence failed: {e}")
+            return False
+
+        try:
+            if autoswitch_theme:
+                set_xfce_theme(logger, switch_target["theme"])
+
+            _restore_dpms_after_eink(logger)
+
+            if not _apply_input_mode(logger, switch_target["input_target"]):
+                logger.warning("Failed to apply OLED input mode; continuing display switch")
+
+            apply_stored_orientation(display_mgr, logger, target=switch_target["input_target"])
+            reconcile_touch(
+                logger,
+                display_mgr,
+                target=switch_target["input_target"],
+                reason=switch_target["snapshot_reason"],
+            )
+            _log_post_switch_display_snapshot(logger, switch_target["snapshot_reason"])
+        except Exception as e:
+            logger.warning(f"OLED post-convergence follow-up failed: {e}")
+
+        if converged:
+            logger.info("Now using OLED")
+        return converged
+    finally:
         if image_process:
             try:
                 image_process.terminate()
+                image_process.wait(timeout=2)
             except Exception:
-                pass
-        return False
-
-    helper_command(helper, logger, "disable-frontlight")
-
-    time.sleep(2.0)
-
-    if image_process:
-        try:
-            image_process.terminate()
-            image_process.wait(timeout=2)
-        except Exception:
-            try:
-                image_process.kill()
-            except Exception:
-                pass
-
-    if not display_mgr.enable_display(DISPLAY_OLED, scale=scale):
-        logger.error("Failed to enable OLED output")
-        return False
-
-    time.sleep(1.0)
-
-    if autoswitch_theme:
-        set_xfce_theme(logger, THEME_ADWAITA_DARK)
-
-    disable_ok = display_mgr.disable_display(DISPLAY_EINK)
-    if not disable_ok:
-        logger.warning("Failed to disable E-Ink output; continuing with final reconcile")
-
-    if not display_mgr.finalize_single_display(DISPLAY_OLED, scale=scale):
-        logger.error("Failed to finalize OLED output layout")
-        return False
-
-    if not disable_ok:
-        logger.warning("OLED switch converged after E-Ink disable failure")
-
-    _restore_dpms_after_eink(logger)
-
-    if not _apply_input_mode(logger, "oled"):
-        logger.warning("Failed to apply OLED input mode; continuing display switch")
-
-    apply_stored_orientation(display_mgr, logger, target="oled")
-    reconcile_touch(logger, display_mgr, target="oled", reason="switch_to_oled")
-    _log_post_switch_display_snapshot(logger, "switch_to_oled")
-
-    logger.info("Now using OLED")
-    return True
+                try:
+                    image_process.kill()
+                except Exception:
+                    pass
