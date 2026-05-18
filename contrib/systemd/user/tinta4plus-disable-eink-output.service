@@ -1,0 +1,12 @@
+[Unit]
+Description=Disable E-Ink X11 output at login
+After=default.target
+
+[Service]
+Type=oneshot
+# xrandr requires the user's X11 login environment, especially DISPLAY/XAUTHORITY.
+# This unit is installed as a systemd --user unit so it runs in the desktop session.
+ExecStart=/usr/bin/xrandr --output eDP-2 --off --output eDP-1 --auto --primary
+
+[Install]
+WantedBy=default.target

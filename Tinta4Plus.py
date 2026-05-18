@@ -28,6 +28,7 @@ import logging
 import webbrowser
 import json
 import grp
+import shutil
 from multiprocessing import Process, Pipe
 from datetime import datetime
 
@@ -599,8 +600,47 @@ class EInkControlGUI:
     def _get_installer_path(self):
         return os.path.join(self._get_script_dir(), 'scripts', 'install-systemd-helper-root.sh')
 
+    def _get_user_unit_source_path(self):
+        return os.path.join(
+            self._get_script_dir(),
+            'contrib',
+            'systemd',
+            'user',
+            'tinta4plus-disable-eink-output.service',
+        )
+
+    def _get_user_unit_dest_path(self):
+        return os.path.expanduser('~/.config/systemd/user/tinta4plus-disable-eink-output.service')
+
+    def _needs_user_unit_install_or_upgrade(self):
+        source = self._get_user_unit_source_path()
+        dest = self._get_user_unit_dest_path()
+        unit_name = os.path.basename(dest)
+
+        if not os.path.exists(source):
+            return True, f"User unit source not found: {source}"
+        if not os.path.exists(dest):
+            return True, None
+
+        try:
+            with open(source, 'rb') as source_file, open(dest, 'rb') as dest_file:
+                if source_file.read() != dest_file.read():
+                    return True, None
+        except Exception as e:
+            return True, f"Could not compare user unit: {e}"
+
+        result = subprocess.run(
+            ['systemctl', '--user', 'is-enabled', unit_name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return True, None
+
+        return False, None
+
     def _needs_helper_install_or_upgrade(self):
-        """Use installer --check mode to detect drift or missing setup."""
+        """Use installer --check mode plus user-unit checks to detect drift or missing setup."""
         installer = self._get_installer_path()
         if not os.path.exists(installer):
             return True, f"Installer not found: {installer}"
@@ -609,14 +649,14 @@ class EInkControlGUI:
         command = [installer, '--check', '--source-dir', self._get_script_dir(), '--user', user_name]
         result = subprocess.run(command, capture_output=True, text=True)
 
-        if result.returncode == 0:
-            return False, None
-
         if result.returncode == 1:
             return True, None
 
-        details = (result.stderr or result.stdout or '').strip()
-        return True, details or f"Check failed with exit code {result.returncode}"
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout or '').strip()
+            return True, details or f"Check failed with exit code {result.returncode}"
+
+        return self._needs_user_unit_install_or_upgrade()
 
     def _is_current_process_in_helper_group(self):
         """Return True when this running process has tinta4plus group in its group list."""
@@ -639,6 +679,29 @@ class EInkControlGUI:
             details = (result.stderr or result.stdout or '').strip()
             return False, details or f"Installer failed with exit code {result.returncode}"
 
+        return self._install_user_unit()
+
+    def _install_user_unit(self):
+        source = self._get_user_unit_source_path()
+        dest = self._get_user_unit_dest_path()
+        unit_name = os.path.basename(dest)
+
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copyfile(source, dest)
+        except Exception as e:
+            return False, f"Failed to install user unit: {e}"
+
+        commands = [
+            ['systemctl', '--user', 'daemon-reload'],
+            ['systemctl', '--user', 'enable', '--now', unit_name],
+        ]
+        for command in commands:
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                details = (result.stderr or result.stdout or '').strip()
+                return False, details or f"Command failed: {' '.join(command)}"
+
         return True, None
 
     def _prompt_install_or_upgrade(self):
@@ -651,8 +714,10 @@ class EInkControlGUI:
 
         if needs_install:
             prompt = (
-                "Tinta4Plus needs to install or update the system helper service.\n\n"
-                "This is a one-time privileged action using pkexec.\n"
+                "Tinta4Plus needs to install or update the system helper service "
+                "and startup display unit.\n\n"
+                "This uses pkexec for the privileged helper, then enables the user "
+                "display unit with systemctl --user enable --now.\n"
                 "Install now?"
             )
         else:
@@ -666,8 +731,8 @@ class EInkControlGUI:
         if not install_now:
             return False
 
-        self.update_status("Installing/updating helper service (password required)...")
-        self.log_message("Installing/updating helper service via pkexec...")
+        self.update_status("Installing/updating helper service and startup display unit (password required)...")
+        self.log_message("Installing/updating helper service via pkexec and user display unit...")
         ok, error = self._run_helper_installer()
         if not ok:
             self.log_message(f"ERROR: Helper install failed - {error}", level='error')
@@ -683,7 +748,7 @@ class EInkControlGUI:
             self.log_message("Group membership update requires re-login before reconnect", level='warning')
             return False
 
-        self.log_message("✓ Helper service installed/updated")
+        self.log_message("✓ Helper service and startup display unit installed/updated")
         return True
 
     def initialize_helper(self):
