@@ -4,9 +4,11 @@ After=default.target
 
 [Service]
 Type=oneshot
-# xrandr requires the user's X11 login environment, especially DISPLAY/XAUTHORITY.
-# This unit is installed as a systemd --user unit so it runs in the desktop session.
-ExecStart=/usr/bin/xrandr --output eDP-2 --off --output eDP-1 --auto --primary
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+# xrandr requires the user's X11 login environment. LightDM/XFCE can start
+# systemd --user units before X is ready, so retry until the display opens.
+ExecStart=/bin/sh -c 'until /usr/bin/xrandr --output eDP-2 --off --output eDP-1 --auto --primary; do sleep 1; done'
 
 [Install]
 WantedBy=default.target
