@@ -18,6 +18,24 @@ SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings")
 DEFAULT_DPMS_STANDBY = 120
 DEFAULT_DPMS_SUSPEND = 0
 DEFAULT_DPMS_OFF = 600
+DISPLAY_POWER_SAVED_STATE_KEY = "display_power_saved_state"
+LEGACY_DPMS_SAVED_STATE_KEY = "dpms_saved_state"
+XFCE_POWER_MANAGER_CHANNEL = "xfce4-power-manager"
+XFCE_POWER_MANAGER_KEYS = {
+    "/xfce4-power-manager/dpms-enabled": "bool",
+    "/xfce4-power-manager/blank-on-ac": "int",
+    "/xfce4-power-manager/blank-on-battery": "int",
+    "/xfce4-power-manager/dpms-on-ac-sleep": "int",
+    "/xfce4-power-manager/dpms-on-ac-off": "int",
+    "/xfce4-power-manager/pre-blank-command": "string",
+}
+XFCE_EINK_POWER_POLICY = {
+    "/xfce4-power-manager/dpms-enabled": "false",
+    "/xfce4-power-manager/blank-on-ac": "0",
+    "/xfce4-power-manager/blank-on-battery": "0",
+    "/xfce4-power-manager/dpms-on-ac-sleep": "0",
+    "/xfce4-power-manager/dpms-on-ac-off": "0",
+}
 EINK_INPUT_PATTERNS = ["ITE Tech. Inc. ITE T-CON*"]
 OLED_INPUT_PATTERNS = ["Wacom HID 537D*"]
 SUPPORTED_ORIENTATION_ROTATIONS = {"normal", "left"}
@@ -426,63 +444,166 @@ def apply_stored_orientation(display_mgr, logger, target):
     return True
 
 
-def _capture_dpms_state(logger):
+def _capture_xset_display_power_state(logger):
     try:
         result = subprocess.run(["xset", "q"], check=True, capture_output=True, text=True)
         output = result.stdout
     except Exception as e:
-        logger.warning(f"Could not query DPMS state via xset: {e}")
+        logger.warning(f"Could not query display power state via xset: {e}")
         return None
 
-    enabled = None
-    standby = suspend = off = None
+    screensaver_timeout = screensaver_cycle = None
+    dpms_enabled = None
+    dpms_standby = dpms_suspend = dpms_off = None
+
+    m_screensaver = re.search(r"timeout:\s*(\d+)\s+cycle:\s*(\d+)", output)
+    if m_screensaver:
+        screensaver_timeout = int(m_screensaver.group(1))
+        screensaver_cycle = int(m_screensaver.group(2))
 
     m_enabled = re.search(r"DPMS is\s+(Enabled|Disabled)", output)
     if m_enabled:
-        enabled = (m_enabled.group(1) == "Enabled")
+        dpms_enabled = (m_enabled.group(1) == "Enabled")
 
     m_timeouts = re.search(r"Standby:\s*(\d+)\s+Suspend:\s*(\d+)\s+Off:\s*(\d+)", output)
     if m_timeouts:
-        standby = int(m_timeouts.group(1))
-        suspend = int(m_timeouts.group(2))
-        off = int(m_timeouts.group(3))
+        dpms_standby = int(m_timeouts.group(1))
+        dpms_suspend = int(m_timeouts.group(2))
+        dpms_off = int(m_timeouts.group(3))
 
-    if enabled is None or standby is None or suspend is None or off is None:
-        logger.warning("Could not parse full DPMS state from xset output")
+    if (
+        screensaver_timeout is None
+        or screensaver_cycle is None
+        or dpms_enabled is None
+        or dpms_standby is None
+        or dpms_suspend is None
+        or dpms_off is None
+    ):
+        logger.warning("Could not parse full display power state from xset output")
         return None
 
     return {
-        "enabled": enabled,
-        "standby": standby,
-        "suspend": suspend,
-        "off": off,
+        "screensaver_timeout": screensaver_timeout,
+        "screensaver_cycle": screensaver_cycle,
+        "dpms_enabled": dpms_enabled,
+        "dpms_standby": dpms_standby,
+        "dpms_suspend": dpms_suspend,
+        "dpms_off": dpms_off,
     }
 
 
-def _save_dpms_state(logger, dpms_state):
+def _coerce_xfce_value(value_type, raw_value):
+    value = raw_value.strip()
+    if value_type == "bool":
+        return value.lower() in ("1", "true", "yes")
+    if value_type == "int":
+        return int(value)
+    return value
+
+
+def _format_xfce_value(saved_value):
+    value_type = saved_value.get("type")
+    value = saved_value.get("value")
+    if value_type == "bool":
+        return "true" if value else "false"
+    return str(value)
+
+
+def _run_xfce_power_manager_query(logger, key):
+    try:
+        result = subprocess.run([
+            "xfconf-query", "-c", XFCE_POWER_MANAGER_CHANNEL, "-p", key,
+        ], check=True, capture_output=True, text=True)
+        return result.stdout
+    except Exception as e:
+        logger.warning(f"Could not query XFCE power-manager key {key}: {e}")
+        return None
+
+
+def _run_xfce_power_manager_set(logger, key, value):
+    try:
+        subprocess.run([
+            "xfconf-query", "-c", XFCE_POWER_MANAGER_CHANNEL, "-p", key, "-s", value,
+        ], check=True, capture_output=True, text=True)
+        return True
+    except Exception as e:
+        logger.warning(f"Could not set XFCE power-manager key {key}={value}: {e}")
+        return False
+
+
+def _capture_xfce_power_manager_state(logger):
+    state = {}
+    for key, value_type in XFCE_POWER_MANAGER_KEYS.items():
+        raw_value = _run_xfce_power_manager_query(logger, key)
+        if raw_value is None:
+            continue
+        try:
+            state[key] = {
+                "type": value_type,
+                "value": _coerce_xfce_value(value_type, raw_value),
+            }
+        except Exception as e:
+            logger.warning(f"Could not parse XFCE power-manager key {key}: {e}")
+    return state
+
+
+def _capture_display_power_state(logger):
+    state = {}
+    xset_state = _capture_xset_display_power_state(logger)
+    if xset_state:
+        state["xset"] = xset_state
+
+    xfce_state = _capture_xfce_power_manager_state(logger)
+    if xfce_state:
+        state["xfce_power_manager"] = xfce_state
+
+    return state if state else None
+
+
+def _save_display_power_state(logger, display_power_state):
     settings = _load_settings(logger)
-    settings["dpms_saved_state"] = dpms_state
+    settings[DISPLAY_POWER_SAVED_STATE_KEY] = display_power_state
+    if LEGACY_DPMS_SAVED_STATE_KEY in settings:
+        del settings[LEGACY_DPMS_SAVED_STATE_KEY]
     _save_settings(logger, settings)
 
 
-def _load_dpms_state(logger):
+def _load_display_power_state(logger):
     settings = _load_settings(logger)
-    value = settings.get("dpms_saved_state")
-    return value if isinstance(value, dict) else None
+    value = settings.get(DISPLAY_POWER_SAVED_STATE_KEY)
+    if isinstance(value, dict):
+        return value
+
+    legacy = settings.get(LEGACY_DPMS_SAVED_STATE_KEY)
+    if isinstance(legacy, dict):
+        return {
+            "legacy_dpms": legacy,
+        }
+    return None
 
 
-def _clear_dpms_state(logger):
+def _has_saved_display_power_state(logger):
     settings = _load_settings(logger)
-    if "dpms_saved_state" in settings:
-        del settings["dpms_saved_state"]
+    return isinstance(settings.get(DISPLAY_POWER_SAVED_STATE_KEY), dict)
+
+
+def _clear_display_power_state(logger):
+    settings = _load_settings(logger)
+    changed = False
+    for key in (DISPLAY_POWER_SAVED_STATE_KEY, LEGACY_DPMS_SAVED_STATE_KEY):
+        if key in settings:
+            del settings[key]
+            changed = True
+    if changed:
         _save_settings(logger, settings)
 
 
-def _disable_dpms_for_eink(logger):
-    state = _capture_dpms_state(logger)
-    if state:
-        _save_dpms_state(logger, state)
-        logger.info(f"Saved DPMS state: enabled={state['enabled']}, standby={state['standby']}, suspend={state['suspend']}, off={state['off']}")
+def _apply_eink_display_power_policy(logger):
+    try:
+        subprocess.run(["xset", "s", "off"], check=True, capture_output=True)
+        logger.info("Disabled X11 screensaver for E-Ink mode")
+    except Exception as e:
+        logger.warning(f"Could not disable X11 screensaver: {e}")
 
     try:
         subprocess.run(["xset", "-dpms"], check=True, capture_output=True)
@@ -490,13 +611,65 @@ def _disable_dpms_for_eink(logger):
     except Exception as e:
         logger.warning(f"Could not disable DPMS: {e}")
 
+    for key, value in XFCE_EINK_POWER_POLICY.items():
+        _run_xfce_power_manager_set(logger, key, value)
+
+
+def _restore_xset_display_power_state(logger, state):
+    subprocess.run([
+        "xset", "s",
+        str(state.get("screensaver_timeout", 0)),
+        str(state.get("screensaver_cycle", 0)),
+    ], check=True, capture_output=True)
+
+    if state.get("dpms_enabled", True):
+        subprocess.run(["xset", "+dpms"], check=True, capture_output=True)
+        subprocess.run([
+            "xset", "dpms",
+            str(state.get("dpms_standby", 0)),
+            str(state.get("dpms_suspend", 0)),
+            str(state.get("dpms_off", 0)),
+        ], check=True, capture_output=True)
+    else:
+        subprocess.run(["xset", "-dpms"], check=True, capture_output=True)
+
+
+def _restore_legacy_dpms_state(logger, state):
+    if state.get("enabled", True):
+        subprocess.run(["xset", "+dpms"], check=True, capture_output=True)
+        subprocess.run([
+            "xset", "dpms",
+            str(state.get("standby", 0)),
+            str(state.get("suspend", 0)),
+            str(state.get("off", 0)),
+        ], check=True, capture_output=True)
+    else:
+        subprocess.run(["xset", "-dpms"], check=True, capture_output=True)
+
+
+def _restore_xfce_power_manager_state(logger, state):
+    for key, saved_value in state.items():
+        _run_xfce_power_manager_set(logger, key, _format_xfce_value(saved_value))
+
+
+def _disable_dpms_for_eink(logger):
+    if not _has_saved_display_power_state(logger):
+        state = _capture_display_power_state(logger)
+        if state:
+            _save_display_power_state(logger, state)
+            logger.info("Saved display power policy for OLED mode")
+    else:
+        logger.info("Display power policy already saved; not overwriting OLED snapshot")
+
+    _apply_eink_display_power_policy(logger)
+
 
 def _restore_dpms_after_eink(logger):
-    state = _load_dpms_state(logger)
+    state = _load_display_power_state(logger)
 
     if not state:
-        current = _capture_dpms_state(logger)
-        if current and not current.get("enabled", True):
+        current = _capture_xset_display_power_state(logger)
+        if current and not current.get("dpms_enabled", True):
             try:
                 subprocess.run(["xset", "+dpms"], check=True, capture_output=True)
                 subprocess.run([
@@ -506,31 +679,28 @@ def _restore_dpms_after_eink(logger):
                     str(DEFAULT_DPMS_OFF),
                 ], check=True, capture_output=True)
                 logger.info(
-                    f"No saved DPMS state; DPMS was disabled, applied defaults "
+                    f"No saved display power policy; DPMS was disabled, applied defaults "
                     f"({DEFAULT_DPMS_STANDBY}/{DEFAULT_DPMS_SUSPEND}/{DEFAULT_DPMS_OFF})"
                 )
             except Exception as e:
                 logger.warning(f"Could not apply default DPMS settings: {e}")
         else:
-            logger.info("No saved DPMS state to restore")
+            logger.info("No saved display power policy to restore")
         return
 
     try:
-        if state.get("enabled", True):
-            subprocess.run(["xset", "+dpms"], check=True, capture_output=True)
-            subprocess.run([
-                "xset", "dpms",
-                str(state.get("standby", 0)),
-                str(state.get("suspend", 0)),
-                str(state.get("off", 0)),
-            ], check=True, capture_output=True)
-            logger.info("Restored DPMS enabled state and timeouts")
-        else:
-            subprocess.run(["xset", "-dpms"], check=True, capture_output=True)
-            logger.info("Restored DPMS disabled state")
-        _clear_dpms_state(logger)
+        if "xset" in state:
+            _restore_xset_display_power_state(logger, state["xset"])
+            logger.info("Restored X11 screensaver and DPMS policy")
+        if "legacy_dpms" in state:
+            _restore_legacy_dpms_state(logger, state["legacy_dpms"])
+            logger.info("Restored legacy DPMS policy")
+        if "xfce_power_manager" in state:
+            _restore_xfce_power_manager_state(logger, state["xfce_power_manager"])
+            logger.info("Restored XFCE power-manager policy")
+        _clear_display_power_state(logger)
     except Exception as e:
-        logger.warning(f"Could not restore DPMS state: {e}")
+        logger.warning(f"Could not restore display power policy: {e}")
 
 
 def switch_to_eink(display_mgr, helper, logger, scale=1.75, autoswitch_theme=True, enable_frontlight=True, brightness_level=4):
